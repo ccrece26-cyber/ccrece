@@ -87,9 +87,12 @@ async function solicitarCodigo(req, res) {
     if (error.code === 'SMTP_NOT_CONFIGURED') {
       return res.status(503).json({ success: false, message: error.message });
     }
+    if (error.code === 'RESEND_ERROR') {
+      return res.status(502).json({ success: false, message: error.message });
+    }
     return res.status(500).json({
       success: false,
-      message: 'No se pudo enviar el código. Verifique SMTP o intente más tarde.',
+      message: 'No se pudo enviar el código. Verifique Resend/SMTP en Vercel.',
     });
   }
 }

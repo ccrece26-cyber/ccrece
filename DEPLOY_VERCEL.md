@@ -14,11 +14,11 @@ En [Vercel](https://vercel.com) → proyecto **api-credi-crece** → **Settings*
 | `DB_SSL` | `true` |
 | `LICENSE_ADMIN_EMAIL` | `delveraz14@gmail.com` (recibe códigos de activación) |
 | `LICENSE_SECRET` | texto largo aleatorio |
-| `SMTP_HOST` | `smtp.gmail.com` |
-| `SMTP_PORT` | `587` |
-| `SMTP_USER` | correo Gmail |
-| `SMTP_PASS` | contraseña de aplicación Gmail |
-| `SMTP_FROM` | opcional, ej. `Credi Crece <tu@gmail.com>` |
+| `RESEND_API_KEY` | clave `re_...` desde [resend.com](https://resend.com) (**recomendado**) |
+| `RESEND_FROM` | `Credi Crece <onboarding@resend.dev>` (pruebas) o tu dominio verificado |
+
+**Correo (licencia):** guía detallada en [RESEND_LICENCIA.md](./RESEND_LICENCIA.md).  
+Alternativa Gmail: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`.
 
 También acepta prefijo `TIDB_*` (`TIDB_HOST`, `TIDB_USER`, etc.).
 

@@ -17,6 +17,13 @@ function resendConfigurado() {
 async function enviarPorResend({ codigo, deviceId, etiqueta }) {
   const dispositivo = etiqueta || deviceId;
   const from = process.env.RESEND_FROM || 'Credi Crece <onboarding@resend.dev>';
+  const html = `
+    <h2>Credi Crece — código de activación</h2>
+    <p><strong>Código:</strong> <span style="font-size:24px;letter-spacing:4px">${codigo}</span></p>
+    <p><strong>Dispositivo:</strong> ${dispositivo}</p>
+    <p><strong>ID:</strong> ${deviceId}</p>
+    <p>Válido 48 horas. Comparta este código con el cliente.</p>
+  `;
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -27,12 +34,15 @@ async function enviarPorResend({ codigo, deviceId, etiqueta }) {
       from,
       to: [ADMIN_EMAIL],
       subject: `Credi Crece — activación ${codigo}`,
-      html: `<h2>Código: <b>${codigo}</b></h2><p>Dispositivo: ${dispositivo}</p><p>ID: ${deviceId}</p>`,
+      text: `Código: ${codigo}\nDispositivo: ${dispositivo}\nID: ${deviceId}`,
+      html,
     }),
   });
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`Resend: ${res.status} ${txt.slice(0, 200)}`);
+    const err = new Error(`Resend (${res.status}): ${txt.slice(0, 280)}`);
+    err.code = 'RESEND_ERROR';
+    throw err;
   }
   return { enviadoA: ADMIN_EMAIL };
 }

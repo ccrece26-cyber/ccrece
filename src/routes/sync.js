@@ -1,4 +1,4 @@
-const { query } = require('../config/db');
+const { query, checkDbConfig, testDbConnection } = require('../config/db');
 
 const TABLAS_PULL = [
   'Clientes',
@@ -109,11 +109,37 @@ async function pushGestiones(req, res) {
 }
 
 async function healthCheck(req, res) {
+  const cfg = checkDbConfig();
+  if (!cfg.ok) {
+    return res.status(503).json({
+      success: false,
+      tidb: 'misconfigured',
+      missing: cfg.missing,
+      hint: 'En Vercel: Settings → Environment Variables. Copie DB_HOST, DB_USER, DB_PASSWORD, DB_NAME y DB_SSL=true desde su .env local.',
+      time: new Date().toISOString(),
+    });
+  }
   try {
-    await query('SELECT 1 AS ok');
-    return res.json({ success: true, tidb: 'connected', time: new Date().toISOString() });
+    await testDbConnection();
+    return res.json({
+      success: true,
+      tidb: 'connected',
+      host: cfg.hostPreview,
+      ssl: cfg.ssl,
+      time: new Date().toISOString(),
+    });
   } catch (error) {
-    return res.status(503).json({ success: false, tidb: 'disconnected', message: error.message });
+    return res.status(503).json({
+      success: false,
+      tidb: 'disconnected',
+      message: error.message,
+      host: cfg.hostPreview,
+      ssl: cfg.ssl,
+      hint: cfg.vercel
+        ? 'Revise que DB_HOST sea el host de TiDB Cloud (no 127.0.0.1) y DB_SSL=true en Vercel.'
+        : undefined,
+      time: new Date().toISOString(),
+    });
   }
 }
 

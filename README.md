@@ -55,9 +55,15 @@ npm run ensure-indexes   # Índices de rendimiento
 npm run fix-schema       # Parches de esquema
 ```
 
+## Vercel (producción)
+
+1. Conecte el repo en Vercel.
+2. Configure variables de entorno — ver **[DEPLOY_VERCEL.md](./DEPLOY_VERCEL.md)**.
+3. Health: `https://api-credi-crece.vercel.app/api/health`
+
 ## App móvil
 
-Configure en Expo `apiHost` / `apiPort` con la IP LAN del servidor (misma red Wi‑Fi que el celular).
+URL por defecto: `https://api-credi-crece.vercel.app/api` (ver `app-financiera/app.config.js`).
 
 ## Rendimiento
 

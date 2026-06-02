@@ -1,87 +1,19 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const compression = require('compression');
-const { login, cambiarPassword } = require('./routes/auth');
-const { syncMasivo } = require('./routes/pagos');
-const { pullChanges, pushGestiones, healthCheck } = require('./routes/sync');
-const admin = require('./routes/admin');
-const adminCampo = require('./routes/adminCampo');
-const cobrador = require('./routes/cobrador');
-const { runStartupTasks } = require('./utils/startup');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(compression({ threshold: 1024 }));
-app.use(express.json({ limit: '4mb' }));
-
-app.get('/api/health', healthCheck);
-app.get('/api/status', healthCheck);
-app.post('/api/auth/login', login);
-app.post('/api/auth/cambiar-password', cambiarPassword);
-
-app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
-app.get('/api/admin/kpis', admin.getKpis);
-app.get('/api/admin/respaldo-sql', admin.getRespaldoSql);
-app.get('/api/admin/reportes/:tipo', admin.getReporte);
-app.get('/api/admin/clientes', admin.listClientes);
-app.post('/api/admin/clientes', admin.createCliente);
-app.put('/api/admin/clientes/:id', admin.updateCliente);
-app.put('/api/admin/clientes/:id/cobrador', admin.asignarClienteCobrador);
-app.get('/api/admin/secuencia-cliente', admin.getSecuenciaCliente);
-app.get('/api/admin/cobradores', admin.listCobradores);
-app.post('/api/admin/cobradores', admin.createCobrador);
-app.put('/api/admin/cobradores/:id', admin.updateCobrador);
-app.post('/api/admin/cobradores/:id/reset-password', admin.resetPasswordUsuario);
-app.get('/api/admin/permisos', admin.getPermisos);
-app.put('/api/admin/permisos', admin.setPermisos);
-app.get('/api/admin/parametros-financieros', admin.getParametrosFinancieros);
-app.put('/api/admin/parametros-financieros', admin.setParametrosFinancieros);
-app.get('/api/admin/contadores', admin.listContadores);
-app.post('/api/admin/contadores', admin.createContador);
-app.put('/api/admin/contadores/:id', admin.updateContador);
-app.post('/api/admin/contadores/:id/reset-password', admin.resetPasswordUsuario);
-app.post('/api/admin/usuarios/:id/reset-password', admin.resetPasswordUsuario);
-app.get('/api/admin/prestamos', admin.listPrestamosActivos);
-app.put('/api/admin/prestamos/:id/frecuencia', admin.updatePrestamoFrecuencia);
-app.post('/api/admin/prestamos', admin.crearPrestamo);
-app.post('/api/admin/renovaciones', admin.renovacion);
-app.get('/api/admin/pagos', admin.listPagosDelDia);
-app.put('/api/admin/pagos/:id', admin.updatePago);
-app.get('/api/admin/solicitudes-correccion', admin.listSolicitudesCorreccion);
-app.get('/api/admin/rutas', admin.listRutas);
-app.post('/api/admin/rutas', admin.crearRuta);
-app.post('/api/admin/rutas/sync-cobradores', admin.syncRutasCobradores);
-app.put('/api/admin/rutas/:rutaId/optimizar', admin.optimizarRuta);
-app.post('/api/admin/demo-clientes-esteli', admin.seedDemoEsteli);
-app.post('/api/admin/carga-masiva/validar', admin.validarCargaMasiva);
-app.post('/api/admin/carga-masiva/importar', admin.importarCargaMasiva);
-app.put('/api/admin/rutas/:rutaId/cobrador', admin.asignarCobrador);
-app.post('/api/admin/rutas/:rutaId/clientes', admin.agregarClienteRuta);
-
-app.get('/api/admin/campo/agenda', adminCampo.getAgendaCampo);
-app.get('/api/admin/campo/resumen-cobro/:prestamoId', adminCampo.getResumenCobroCampo);
-app.post('/api/admin/campo/pago', adminCampo.postPagoCampo);
-app.post('/api/admin/campo/gestion-no-pago', adminCampo.postGestionNoPagoCampo);
-
-app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
-app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);
-app.post('/api/cobrador/sync/push', cobrador.pushSync);
-app.get('/api/cobrador/sync/aviso/:cobradorId', cobrador.syncAviso);
-app.post('/api/cobrador/solicitud-correccion', cobrador.crearSolicitudCorreccion);
-
-app.post('/api/pagos/sync-masivo', syncMasivo);
-app.get('/api/sync/pull', pullChanges);
-app.post('/api/sync/push-gestiones', pushGestiones);
-
-app.listen(PORT, process.env.API_HOST || '0.0.0.0', () => {
-  console.log(`\n🇳🇮 Microfinanzas API → TiDB Cloud :${PORT}`);
-  console.log('   Admin:  /api/admin/*  (nube directa)');
-  console.log('   Carga masiva: POST /api/admin/carga-masiva/validar | importar');
-  console.log('   Respaldo:   GET  /api/admin/respaldo-sql');
-  console.log('   Admin campo: GET /api/admin/campo/agenda | POST pago | gestion-no-pago');
-  console.log('   Cobrador: /api/cobrador/ruta-diaria + sync/push\n');
-  void runStartupTasks();
-});
+require('dotenv').config();
+const app = require('./app');
+const { runStartupTasks } = require('./utils/startup');
+
+const PORT = process.env.PORT || 3000;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, process.env.API_HOST || '0.0.0.0', () => {
+    console.log(`\n🇳🇮 Microfinanzas API → TiDB Cloud :${PORT}`);
+    console.log('   Admin:  /api/admin/*  (nube directa)');
+    console.log('   Carga masiva: POST /api/admin/carga-masiva/validar | importar');
+    console.log('   Respaldo:   GET  /api/admin/respaldo-sql');
+    console.log('   Admin campo: GET /api/admin/campo/agenda | POST pago | gestion-no-pago');
+    console.log('   Cobrador: /api/cobrador/ruta-diaria + sync/push\n');
+    void runStartupTasks();
+  });
+}
+
+module.exports = app;

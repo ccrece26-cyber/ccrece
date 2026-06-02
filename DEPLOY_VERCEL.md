@@ -12,6 +12,13 @@ En [Vercel](https://vercel.com) → proyecto **api-credi-crece** → **Settings*
 | `DB_PASSWORD` | contraseña TiDB |
 | `DB_NAME` | `microfinanzas_nica` |
 | `DB_SSL` | `true` |
+| `LICENSE_ADMIN_EMAIL` | `delveraz14@gmail.com` (recibe códigos de activación) |
+| `LICENSE_SECRET` | texto largo aleatorio |
+| `SMTP_HOST` | `smtp.gmail.com` |
+| `SMTP_PORT` | `587` |
+| `SMTP_USER` | correo Gmail |
+| `SMTP_PASS` | contraseña de aplicación Gmail |
+| `SMTP_FROM` | opcional, ej. `Credi Crece <tu@gmail.com>` |
 
 También acepta prefijo `TIDB_*` (`TIDB_HOST`, `TIDB_USER`, etc.).
 

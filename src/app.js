@@ -8,6 +8,7 @@ const { pullChanges, pushGestiones, healthCheck } = require('./routes/sync');
 const admin = require('./routes/admin');
 const adminCampo = require('./routes/adminCampo');
 const cobrador = require('./routes/cobrador');
+const licencia = require('./routes/licencia');
 
 const app = express();
 
@@ -27,6 +28,10 @@ app.get('/api/health', healthCheck);
 app.get('/api/status', healthCheck);
 app.post('/api/auth/login', login);
 app.post('/api/auth/cambiar-password', cambiarPassword);
+
+app.post('/api/licencia/solicitar', licencia.solicitarCodigo);
+app.post('/api/licencia/verificar', licencia.verificarCodigo);
+app.get('/api/licencia/estado', licencia.estadoLicencia);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
 app.get('/api/admin/kpis', admin.getKpis);

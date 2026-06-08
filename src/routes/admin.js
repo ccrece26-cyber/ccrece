@@ -283,13 +283,15 @@ async function listRutas(req, res) {
 
 async function listCobradores(req, res) {
   try {
-    const rows = await query(
-      `SELECT u.id, u.nombre_completo, u.email, u.activo,
+    const todos = req.query.todos === '1';
+    let sql = `SELECT u.id, u.nombre_completo, u.email, u.activo,
               (SELECT COUNT(*) FROM Clientes c WHERE c.cobrador_id = u.id AND c.deleted_at IS NULL) AS total_clientes
        FROM Usuarios u
        JOIN Roles r ON u.rol_id = r.id
-       WHERE r.nombre = 'COBRADOR' AND u.activo = 1`
-    );
+       WHERE r.nombre = 'COBRADOR'`;
+    if (!todos) sql += ' AND u.activo = 1';
+    sql += ' ORDER BY u.activo DESC, u.nombre_completo ASC';
+    const rows = await query(sql);
     return res.json({ success: true, data: rows });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -447,10 +449,12 @@ async function updatePrestamoFrecuencia(req, res) {
 
 async function listContadores(req, res) {
   try {
-    const rows = await query(
-      `SELECT u.id, u.nombre_completo, u.email, u.activo FROM Usuarios u
-       JOIN Roles r ON u.rol_id = r.id WHERE r.nombre = 'CONTADOR' AND u.activo = 1`
-    );
+    const todos = req.query.todos === '1';
+    let sql = `SELECT u.id, u.nombre_completo, u.email, u.activo FROM Usuarios u
+       JOIN Roles r ON u.rol_id = r.id WHERE r.nombre = 'CONTADOR'`;
+    if (!todos) sql += ' AND u.activo = 1';
+    sql += ' ORDER BY u.activo DESC, u.nombre_completo ASC';
+    const rows = await query(sql);
     return res.json({ success: true, data: rows });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

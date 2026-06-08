@@ -5,11 +5,22 @@ const { pool, query } = require('../config/db');
 
 const SQL_PATH = path.join(__dirname, 'vistas-reporte.sql');
 
+function stripLeadingComments(sql) {
+  return sql
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return t.length > 0 && !t.startsWith('--');
+    })
+    .join('\n')
+    .trim();
+}
+
 function splitStatements(sql) {
   return sql
     .split(/;\s*\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0 && !s.startsWith('--'));
+    .map((s) => stripLeadingComments(s))
+    .filter((s) => s.length > 0);
 }
 
 async function createViews() {

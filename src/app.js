@@ -16,7 +16,6 @@ const app = express();
 app.use(cors());
 app.use(compression({ threshold: 1024 }));
 app.use(express.json({ limit: '4mb' }));
-app.use('/api', guardEscrituraActiva);
 
 app.get('/', (req, res) => {
   res.json({
@@ -26,14 +25,16 @@ app.get('/', (req, res) => {
   });
 });
 
+/** Rutas públicas (sin X-Operador-Id) — deben ir ANTES del guard. */
 app.get('/api/health', healthCheck);
 app.get('/api/status', healthCheck);
 app.post('/api/auth/login', login);
 app.post('/api/auth/cambiar-password', cambiarPassword);
-
 app.post('/api/licencia/solicitar', licencia.solicitarCodigo);
 app.post('/api/licencia/verificar', licencia.verificarCodigo);
 app.get('/api/licencia/estado', licencia.estadoLicencia);
+
+app.use('/api', guardEscrituraActiva);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
 app.get('/api/admin/kpis', admin.getKpis);

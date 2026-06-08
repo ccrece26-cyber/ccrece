@@ -56,6 +56,7 @@ function extraerOperadorId(req) {
   if (req.params?.cobradorId) return req.params.cobradorId;
 
   const q = req.query || {};
+  if (q.operador_id) return q.operador_id;
   if (q.admin_id) return q.admin_id;
   if (q.cobrador_id) return q.cobrador_id;
 

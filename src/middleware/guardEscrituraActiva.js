@@ -2,11 +2,21 @@ const { exigirUsuarioActivo, extraerOperadorId, responderErrorUsuario } = requir
 
 const METODOS_LECTURA = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+function rutaSolicitud(req) {
+  const raw = req.originalUrl || req.url || req.path || '';
+  return String(raw).split('?')[0];
+}
+
 function esRutaPublica(req) {
-  const p = req.path || '';
-  if (p === '/' || p === '/api/health' || p === '/api/status') return true;
+  const p = rutaSolicitud(req);
+  if (p === '/' || p === '/api' || p === '/api/') return true;
+  if (p === '/api/health' || p === '/api/status') return true;
   if (p.startsWith('/api/auth/')) return true;
   if (p.startsWith('/api/licencia/')) return true;
+  // Montado en /api: req.path suele ser /auth/login, /licencia/..., etc.
+  if (p === '/health' || p === '/status') return true;
+  if (p.startsWith('/auth/')) return true;
+  if (p.startsWith('/licencia/')) return true;
   return false;
 }
 

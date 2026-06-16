@@ -64,6 +64,8 @@ async function rutaDiaria(req, res) {
     let prestamos = [];
     let cuotas = [];
     let fiadores = [];
+    let garantias = [];
+    let prestamo_garantias = [];
 
     if (clienteIds.length) {
       const ph2 = clienteIds.map(() => '?').join(',');
@@ -87,6 +89,21 @@ async function rutaDiaria(req, res) {
            ORDER BY fecha_programada`,
           [...prestamoIds, hoy]
         );
+      }
+      if (prestamoIds.length) {
+        const phPg = prestamoIds.map(() => '?').join(',');
+        prestamo_garantias = await query(
+          `SELECT prestamo_id, garantia_id FROM Prestamo_Garantias WHERE prestamo_id IN (${phPg})`,
+          prestamoIds
+        );
+        const garIds = [...new Set(prestamo_garantias.map((pg) => pg.garantia_id).filter(Boolean))];
+        if (garIds.length) {
+          const phG = garIds.map(() => '?').join(',');
+          garantias = await query(
+            `SELECT * FROM Garantias WHERE id IN (${phG}) AND deleted_at IS NULL`,
+            garIds
+          );
+        }
       }
       const fiadorIds = [...new Set(prestamos.map((p) => p.fiador_id).filter(Boolean))];
       if (fiadorIds.length) {
@@ -240,7 +257,7 @@ async function rutaDiaria(req, res) {
       secuencia,
       dia_cobro: hoyDia,
       parametros_financieros: await leerParametrosFinancieros(query),
-      data: { rutas, ruta_clientes, clientes, prestamos, cuotas, fiadores, agenda, pagos_hoy, gestiones_hoy },
+      data: { rutas, ruta_clientes, clientes, prestamos, cuotas, fiadores, garantias, prestamo_garantias, agenda, pagos_hoy, gestiones_hoy },
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

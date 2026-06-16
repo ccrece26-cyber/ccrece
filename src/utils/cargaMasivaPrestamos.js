@@ -121,8 +121,16 @@ const parseFechaISO = (v) => {
   return null;
 };
 
+function esFilaEjemplo(raw) {
+  const email = String(raw?.cobrador_email ?? raw?.email_cobrador ?? '')
+    .trim()
+    .toLowerCase();
+  return email === 'ejemplo@borrar.com';
+}
+
 /** Normaliza fila Excel/CSV (objeto clave-valor) */
 function normalizarFila(raw, indice) {
+  if (esFilaEjemplo(raw)) return { _fila: indice + 1, _omitir: true };
   const src = {};
   for (const [k, v] of Object.entries(raw || {})) {
     src[normKey(k)] = v;
@@ -248,6 +256,23 @@ function calcularPreview(fila) {
     agenda.length,
     Math.max(0, fila.semanas_pagadas) * cuotasPorSemana
   );
+  if (
+    fila.semanas_pagadas > 0 &&
+    fila.saldo_pendiente != null &&
+    fila.saldo_pendiente > 0
+  ) {
+    const montoPagadoEst = cuotasAPagar * fin.cuotaPorDiaDeCobro;
+    const saldoEsperado = Math.max(0, Number((fin.montoTotalPagar - montoPagadoEst).toFixed(2)));
+    const diff = Math.abs(saldo - saldoEsperado);
+    if (diff > fin.cuotaPorDiaDeCobro * 1.5 && diff > fin.montoTotalPagar * 0.08) {
+      return {
+        error: `saldo_pendiente (${saldo}) no cuadra con semanas_pagadas (${fila.semanas_pagadas}); esperado ~${saldoEsperado}`,
+      };
+    }
+  }
+  if (cuotasAPagar >= agenda.length && saldo > 0.02) {
+    return { error: 'semanas_pagadas cubren el plazo pero saldo_pendiente sigue > 0' };
+  }
   return {
     ...fin,
     saldo_pendiente: Number(saldo.toFixed(2)),
@@ -260,16 +285,31 @@ async function validarFilas(filasRaw, queryFn) {
   const mapa = await cargarMapaCobradores(queryFn);
   const validas = [];
   const errores = [];
+  const cedulasVistas = new Map();
 
   for (let i = 0; i < filasRaw.length; i += 1) {
     const raw = filasRaw[i];
     if (!raw || (typeof raw === 'object' && Object.values(raw).every((v) => v === '' || v == null))) continue;
 
     const fila = normalizarFila(raw, i);
+    if (fila._omitir) continue;
     const camposErr = validarFilaCampos(fila);
     if (camposErr.length) {
       errores.push({ fila: fila._fila, cedula: fila.cedula, errores: camposErr });
       continue;
+    }
+
+    if (fila.cedula) {
+      const prev = cedulasVistas.get(fila.cedula);
+      if (prev != null) {
+        errores.push({
+          fila: fila._fila,
+          cedula: fila.cedula,
+          errores: [`Cédula duplicada en el archivo (ya en fila ${prev})`],
+        });
+        continue;
+      }
+      cedulasVistas.set(fila.cedula, fila._fila);
     }
 
     const cobrador = resolverCobrador(fila, mapa);
@@ -362,9 +402,16 @@ async function insertarCuotasBulk(conn, cuotasRows) {
     conn,
     {
       insert:
-        'INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)',
-      placeholder: '(?, ?, ?, ?, ?, 1)',
-      values: (c) => [c.id, c.prestamo_id, c.fecha_programada, c.monto_programado, c.estado],
+        'INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, monto_pagado, estado, is_synced)',
+      placeholder: '(?, ?, ?, ?, ?, ?, 1)',
+      values: (c) => [
+        c.id,
+        c.prestamo_id,
+        c.fecha_programada,
+        c.monto_programado,
+        c.monto_pagado ?? 0,
+        c.estado,
+      ],
     },
     cuotasRows,
     100
@@ -482,13 +529,14 @@ async function importarUnaFila(conn, fila, ctx) {
 
   for (let i = 0; i < agenda.length; i += 1) {
     const c = agenda[i];
-    const estado = i < pagarHasta ? 'Pagada' : 'Programada';
+    const pagada = i < pagarHasta;
     ctx.cuotasBuffer.push({
       id: uuidv4(),
       prestamo_id: prestamoId,
       fecha_programada: c.fecha_programada,
       monto_programado: c.monto_programado,
-      estado,
+      monto_pagado: pagada ? c.monto_programado : 0,
+      estado: pagada ? 'Pagada' : 'Programada',
     });
   }
 
@@ -529,16 +577,27 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
 
   const preparadas = [];
   const erroresPrev = [];
+  const cedulasVistas = new Set();
 
   for (let i = 0; i < filasRaw.length; i += 1) {
     const raw = filasRaw[i];
     if (!raw || (typeof raw === 'object' && Object.values(raw).every((v) => v === '' || v == null))) continue;
     const fila = normalizarFila(raw, i);
+    if (fila._omitir) continue;
     const camposErr = validarFilaCampos(fila);
     if (camposErr.length) {
       erroresPrev.push({ fila: fila._fila, cedula: fila.cedula, error: camposErr.join('; ') });
       continue;
     }
+    if (fila.cedula && cedulasVistas.has(fila.cedula)) {
+      erroresPrev.push({
+        fila: fila._fila,
+        cedula: fila.cedula,
+        error: 'Cédula duplicada en el archivo',
+      });
+      continue;
+    }
+    if (fila.cedula) cedulasVistas.add(fila.cedula);
     const cobrador = resolverCobrador(fila, mapa);
     if (!cobrador) {
       erroresPrev.push({ fila: fila._fila, cedula: fila.cedula, error: 'Cobrador no encontrado' });

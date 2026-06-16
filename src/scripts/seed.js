@@ -44,8 +44,7 @@ async function seed() {
     [uuidv4()]
   );
 
-  console.log('\n🌱 Seed: 3 roles + admin@nica.com / admin124');
-  console.log('   Use npm run reset-cloud para borrar todos los datos de negocio.\n');
+  console.log('\n🌱 Seed: 3 roles + admin@nica.com / admin124\n');
   await pool.end();
 }
 

@@ -74,6 +74,10 @@ app.put('/api/admin/rutas/:rutaId/optimizar', admin.optimizarRuta);
 app.post('/api/admin/demo-clientes-esteli', admin.seedDemoEsteli);
 app.post('/api/admin/carga-masiva/validar', admin.validarCargaMasiva);
 app.post('/api/admin/carga-masiva/importar', admin.importarCargaMasiva);
+app.post('/api/admin/carga-masiva-garantias/validar', admin.validarCargaMasivaGarantias);
+app.post('/api/admin/carga-masiva-garantias/importar', admin.importarCargaMasivaGarantias);
+app.get('/api/admin/prestamos/:id/garantias', admin.listGarantiasPrestamo);
+app.post('/api/admin/prestamos/:id/garantias', admin.agregarGarantiasPrestamo);
 app.put('/api/admin/rutas/:rutaId/cobrador', admin.asignarCobrador);
 app.post('/api/admin/rutas/:rutaId/clientes', admin.agregarClienteRuta);
 

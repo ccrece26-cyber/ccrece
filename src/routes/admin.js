@@ -22,6 +22,10 @@ const {
 const { buildAgendaCobrador, buildCumplimientoBatch, diaCobroDeFecha } = require('../utils/agendaCobrador');
 const { diaCobroHoy } = require('../utils/diasCobro');
 const { validarFilas, importarFilas } = require('../utils/cargaMasivaPrestamos');
+const {
+  validarFilas: validarFilasGarantias,
+  importarFilas: importarFilasGarantias,
+} = require('../utils/cargaMasivaGarantias');
 const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
@@ -1408,6 +1412,130 @@ async function importarCargaMasiva(req, res) {
   }
 }
 
+async function validarCargaMasivaGarantias(req, res) {
+  try {
+    const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
+    if (!filas.length) {
+      return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
+    }
+    if (filas.length > 500) {
+      return res.status(400).json({ success: false, message: 'Maximo 500 filas por solicitud.' });
+    }
+    const data = await validarFilasGarantias(filas, query);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function importarCargaMasivaGarantias(req, res) {
+  try {
+    const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
+    if (!filas.length) {
+      return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
+    }
+    if (filas.length > 500) {
+      return res.status(400).json({ success: false, message: 'Maximo 500 filas por solicitud.' });
+    }
+    const data = await importarFilasGarantias(filas, query, getConnection);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function listGarantiasPrestamo(req, res) {
+  try {
+    const rows = await query(
+      `SELECT g.* FROM Garantias g
+       INNER JOIN Prestamo_Garantias pg ON g.id = pg.garantia_id
+       WHERE pg.prestamo_id = ? AND g.deleted_at IS NULL`,
+      [req.params.id]
+    );
+    return res.json({ success: true, data: rows });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function agregarGarantiasPrestamo(req, res) {
+  const conn = await getConnection();
+  try {
+    const prestamoId = req.params.id;
+    const items = Array.isArray(req.body?.garantias_nuevas) ? req.body.garantias_nuevas : [];
+    const reutilizar = Array.isArray(req.body?.garantias_reutilizar_ids)
+      ? req.body.garantias_reutilizar_ids
+      : [];
+
+    if (!items.length && !reutilizar.length) {
+      return res.status(400).json({ success: false, message: 'Indique garantías nuevas o a reutilizar.' });
+    }
+
+    const [pre] = await conn.execute(
+      `SELECT id, cliente_id, estado FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      [prestamoId]
+    );
+    if (!pre.length) {
+      return res.status(404).json({ success: false, message: 'Préstamo no encontrado.' });
+    }
+    if (pre[0].estado !== 'Activo') {
+      return res.status(400).json({ success: false, message: 'Solo se pueden agregar garantías a préstamos activos.' });
+    }
+
+    await conn.beginTransaction();
+    const creadas = [];
+
+    for (const gid of reutilizar) {
+      const [g] = await conn.execute(
+        `SELECT id FROM Garantias WHERE id = ? AND cliente_id = ? AND deleted_at IS NULL LIMIT 1`,
+        [gid, pre[0].cliente_id]
+      );
+      if (!g.length) continue;
+      await conn.execute(
+        `INSERT INTO Prestamo_Garantias (prestamo_id, garantia_id) VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE prestamo_id = prestamo_id`,
+        [prestamoId, gid]
+      );
+      await conn.execute(`UPDATE Garantias SET estado = 'Comprometida', is_synced = 1 WHERE id = ?`, [gid]);
+      creadas.push(gid);
+    }
+
+    for (const art of items) {
+      const tipo = String(art.tipo_articulo || '').trim();
+      const valor = Number(art.valor_estimado);
+      if (!tipo || !Number.isFinite(valor) || valor < 0) {
+        throw new Error('Cada garantía nueva requiere tipo_articulo y valor_estimado válido.');
+      }
+      const gid = `GAR-${uuidv4().replace(/-/g, '').slice(0, 10).toUpperCase()}`;
+      await conn.execute(
+        `INSERT INTO Garantias (id, cliente_id, tipo_articulo, marca, numero_serie, valor_estimado, estado, is_synced)
+         VALUES (?, ?, ?, ?, ?, ?, 'Comprometida', 1)`,
+        [
+          gid,
+          pre[0].cliente_id,
+          tipo,
+          art.marca || null,
+          art.numero_serie || null,
+          valor,
+        ]
+      );
+      await conn.execute(
+        `INSERT INTO Prestamo_Garantias (prestamo_id, garantia_id) VALUES (?, ?)`,
+        [prestamoId, gid]
+      );
+      creadas.push(gid);
+    }
+
+    await conn.commit();
+    return res.json({ success: true, garantias: creadas, total: creadas.length });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(500).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   getRespaldoSql,
   getKpis,
@@ -1446,6 +1574,10 @@ module.exports = {
   getCumplimientoRuta,
   validarCargaMasiva,
   importarCargaMasiva,
+  validarCargaMasivaGarantias,
+  importarCargaMasivaGarantias,
+  listGarantiasPrestamo,
+  agregarGarantiasPrestamo,
   esIdClienteOficial,
   camposCliente,
   nextClienteId,

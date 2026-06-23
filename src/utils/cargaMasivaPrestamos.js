@@ -555,6 +555,10 @@ async function importarUnaFila(conn, fila, ctx) {
     orden = next;
   }
   await conn.execute(
+    `DELETE FROM Ruta_Clientes WHERE cliente_id = ? AND ruta_id != ?`,
+    [clienteId, rutaId]
+  );
+  await conn.execute(
     `INSERT INTO Ruta_Clientes (ruta_id, cliente_id, orden_visita)
      VALUES (?, ?, ?)
      ON DUPLICATE KEY UPDATE orden_visita = VALUES(orden_visita)`,

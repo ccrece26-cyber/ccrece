@@ -151,9 +151,9 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
      FROM Clientes c
      INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
      INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1
-     WHERE c.deleted_at IS NULL
+     WHERE c.deleted_at IS NULL AND c.cobrador_id = ?
      ORDER BY rc.orden_visita ASC, c.id`,
-    [cobradorId]
+    [cobradorId, cobradorId]
   );
 
   const clienteIds = clientes.map((c) => c.id);
@@ -234,9 +234,9 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
      FROM Clientes c
      INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
      INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id IN (${ph}) AND r.activa = 1
-     WHERE c.deleted_at IS NULL
+     WHERE c.deleted_at IS NULL AND c.cobrador_id IN (${ph})
      ORDER BY r.cobrador_id, rc.orden_visita ASC, c.id`,
-    [...cobradorIds]
+    [...cobradorIds, ...cobradorIds]
   );
 
   const clienteIds = [...new Set(clientes.map((c) => c.id))];

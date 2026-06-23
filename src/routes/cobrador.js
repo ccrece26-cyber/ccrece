@@ -14,7 +14,7 @@ const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } =
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
 const { rangoDiaLocal } = require('../utils/fechasSql');
-const { ensureRutaForCobrador, agregarClienteARuta } = require('../utils/rutas');
+const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
@@ -57,9 +57,9 @@ async function rutaDiaria(req, res) {
        FROM Clientes c
        INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
        INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1
-       WHERE c.deleted_at IS NULL
+       WHERE c.deleted_at IS NULL AND c.cobrador_id = ?
        ORDER BY rc.orden_visita ASC, c.id`,
-      [cobradorId]
+      [cobradorId, cobradorId]
     );
 
     const clienteIds = clientes.map((c) => c.id);
@@ -425,8 +425,7 @@ async function pushSync(req, res) {
               'SELECT nombre_completo FROM Usuarios WHERE id = ? LIMIT 1',
               [cobId]
             );
-            const rutaId = await ensureRutaForCobrador(cobId, cobRow[0]?.nombre_completo, conn);
-            await agregarClienteARuta(rutaId, clientId, conn);
+            await sincronizarRutaClienteAsignado(clientId, cobId, cobRow[0]?.nombre_completo, conn);
           }
         }
         synced.clientes.push(c.id);

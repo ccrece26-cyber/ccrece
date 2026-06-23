@@ -63,6 +63,26 @@ async function listarIdsClientesEnRuta(operadorId, conn = null) {
   return rows.map((r) => r.cliente_id);
 }
 
+async function quitarClienteDeOtrasRutas(clienteId, rutaIdDestino, conn = null) {
+  await runSql(
+    conn,
+    `DELETE FROM Ruta_Clientes WHERE cliente_id = ? AND ruta_id != ?`,
+    [clienteId, rutaIdDestino]
+  );
+}
+
+/** Un cliente solo puede estar en la ruta de su cobrador asignado. */
+async function sincronizarRutaClienteAsignado(clienteId, cobradorId, nombreCobrador = null, conn = null) {
+  if (!cobradorId) {
+    await runSql(conn, `DELETE FROM Ruta_Clientes WHERE cliente_id = ?`, [clienteId]);
+    return null;
+  }
+  const rutaId = await ensureRutaForCobrador(cobradorId, nombreCobrador, conn);
+  await quitarClienteDeOtrasRutas(clienteId, rutaId, conn);
+  await agregarClienteARuta(rutaId, clienteId, conn);
+  return rutaId;
+}
+
 async function agregarClienteARuta(rutaId, clienteId, conn = null) {
   const maxRows = await runSql(
     conn,
@@ -132,10 +152,28 @@ async function vincularClientesCobradorARuta(cobradorId) {
     [cobradorId]
   );
   for (const cl of clientes) {
-    await agregarClienteARuta(rutaId, cl.id);
+    await sincronizarRutaClienteAsignado(cl.id, cobradorId, null, null);
   }
   await optimizarOrdenRuta(rutaId);
   return rutaId;
+}
+
+/** Elimina clientes en rutas que no coinciden con su cobrador_id asignado. */
+async function repararRutasClientesDuplicadas(conn = null) {
+  const sql = `DELETE rc FROM Ruta_Clientes rc
+     INNER JOIN Rutas r ON rc.ruta_id = r.id
+     INNER JOIN Clientes c ON rc.cliente_id = c.id
+     WHERE c.deleted_at IS NULL
+       AND c.cobrador_id IS NOT NULL
+       AND r.cobrador_id IS NOT NULL
+       AND c.cobrador_id != r.cobrador_id`;
+  if (conn) {
+    const [result] = await conn.execute(sql);
+    return result.affectedRows || 0;
+  }
+  const { pool } = require('../config/db');
+  const [result] = await pool.execute(sql);
+  return result.affectedRows || 0;
 }
 
 module.exports = {
@@ -145,8 +183,11 @@ module.exports = {
   obtenerRutaIdOperador,
   quitarClienteDeRutaOperador,
   listarIdsClientesEnRuta,
+  quitarClienteDeOtrasRutas,
+  sincronizarRutaClienteAsignado,
   agregarClienteARuta,
   optimizarOrdenRuta,
   sincronizarRutasCobradores,
   vincularClientesCobradorARuta,
+  repararRutasClientesDuplicadas,
 };

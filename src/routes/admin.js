@@ -8,6 +8,7 @@ const { nextClienteId, initSecuenciaCliente, esIdClienteOficial } = require('../
 const { upsertFiadorEnNube, vincularFiadorAPrestamo } = require('../utils/fiadoresNube');
 const {
   ensureRutaForCobrador,
+  sincronizarRutaClienteAsignado,
   agregarClienteARuta,
   optimizarOrdenRuta,
   sincronizarRutasCobradores,
@@ -160,8 +161,7 @@ async function createCliente(req, res) {
           message: 'El cobrador asignado no existe. Elija un cobrador activo.',
         });
       }
-      const rutaId = await ensureRutaForCobrador(c.cobrador_id, cob[0].nombre_completo, conn);
-      await agregarClienteARuta(rutaId, id, conn);
+      await sincronizarRutaClienteAsignado(id, c.cobrador_id, cob[0].nombre_completo, conn);
     }
 
     await conn.commit();
@@ -199,8 +199,7 @@ async function updateCliente(req, res) {
 
     if (c.cobrador_id) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [c.cobrador_id]);
-      const rutaId = await ensureRutaForCobrador(c.cobrador_id, cob?.nombre_completo);
-      await agregarClienteARuta(rutaId, id);
+      const rutaId = await sincronizarRutaClienteAsignado(id, c.cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
       return res.json({ success: true, ruta_id: rutaId });
     }
@@ -223,18 +222,12 @@ async function asignarClienteCobrador(req, res) {
 
     if (cobrador_id) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [cobrador_id]);
-      const rutaId = await ensureRutaForCobrador(cobrador_id, cob?.nombre_completo);
-      await agregarClienteARuta(rutaId, id);
+      const rutaId = await sincronizarRutaClienteAsignado(id, cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
       return res.json({ success: true, ruta_id: rutaId, mensaje: 'Cliente agregado a ruta optimizada' });
     }
 
-    await query(
-      `DELETE rc FROM Ruta_Clientes rc
-       JOIN Rutas r ON rc.ruta_id = r.id
-       WHERE rc.cliente_id = ? AND r.cobrador_id IS NOT NULL`,
-      [id]
-    );
+    await sincronizarRutaClienteAsignado(id, null);
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

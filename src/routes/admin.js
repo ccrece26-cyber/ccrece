@@ -28,6 +28,7 @@ const {
 } = require('../utils/cargaMasivaGarantias');
 const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
+const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
 
 const txt = (v) => {
@@ -1536,6 +1537,73 @@ async function agregarGarantiasPrestamo(req, res) {
   }
 }
 
+async function aplicarProrroga(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await aplicarProrrogaEnNube(conn, {
+      prestamo_id: req.body.prestamo_id,
+      semanas_extra: req.body.semanas_extra,
+      comentario: req.body.comentario || 'Prórroga con interés congelado',
+      operador_id: req.operadorId,
+    });
+    await conn.commit();
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function exportCarteraImportacion(req, res) {
+  try {
+    const cartera = await query(
+      `SELECT c.cedula,
+              c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
+              c.nombre_completo, c.telefono, c.direccion, c.actividad_economica,
+              u.email AS cobrador_email,
+              p.monto_desembolsado, p.plazo_semanas,
+              ROUND(p.tasa_interes_aplicada / GREATEST(p.plazo_semanas / 4, 1) * 100, 2) AS tasa_mensual,
+              p.dias_de_cobro, DATE_FORMAT(p.fecha_desembolso, '%Y-%m-%d') AS fecha_desembolso,
+              p.saldo_pendiente,
+              FLOOR(
+                (SELECT COUNT(*) FROM Cuotas_Calendario cc
+                 WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL
+                   AND (cc.estado = 'Pagada' OR cc.monto_pagado >= cc.monto_programado - 0.01))
+                / GREATEST(p.frecuencia_semana, 1)
+              ) AS semanas_pagadas,
+              c.latitud, c.longitud,
+              rc.orden_visita
+       FROM Prestamos p
+       JOIN Clientes c ON p.cliente_id = c.id AND c.deleted_at IS NULL
+       LEFT JOIN Usuarios u ON c.cobrador_id = u.id
+       LEFT JOIN Ruta_Clientes rc ON rc.cliente_id = c.id
+       LEFT JOIN Rutas r ON r.id = rc.ruta_id AND r.cobrador_id = c.cobrador_id AND r.activa = 1
+       WHERE p.estado = 'Activo' AND p.deleted_at IS NULL
+       ORDER BY c.nombre_completo`
+    );
+
+    const garantias = await query(
+      `SELECT c.cedula, g.tipo_articulo, g.marca, g.numero_serie, g.valor_estimado
+       FROM Garantias g
+       JOIN Clientes c ON g.cliente_id = c.id AND c.deleted_at IS NULL
+       JOIN Prestamos p ON p.cliente_id = c.id AND p.estado = 'Activo' AND p.deleted_at IS NULL
+       WHERE g.deleted_at IS NULL
+       ORDER BY c.nombre_completo, g.tipo_articulo`
+    );
+
+    return res.json({
+      success: true,
+      data: { cartera, garantias },
+      generado: new Date().toISOString(),
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 module.exports = {
   getRespaldoSql,
   getKpis,
@@ -1578,6 +1646,8 @@ module.exports = {
   importarCargaMasivaGarantias,
   listGarantiasPrestamo,
   agregarGarantiasPrestamo,
+  aplicarProrroga,
+  exportCarteraImportacion,
   esIdClienteOficial,
   camposCliente,
   nextClienteId,

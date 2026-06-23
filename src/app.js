@@ -58,6 +58,8 @@ app.post('/api/admin/contadores', admin.createContador);
 app.put('/api/admin/contadores/:id', admin.updateContador);
 app.post('/api/admin/contadores/:id/reset-password', admin.resetPasswordUsuario);
 app.post('/api/admin/usuarios/:id/reset-password', admin.resetPasswordUsuario);
+app.post('/api/admin/prorrogas', admin.aplicarProrroga);
+app.get('/api/admin/export/cartera-importacion', admin.exportCarteraImportacion);
 app.get('/api/admin/prestamos', admin.listPrestamosActivos);
 app.put('/api/admin/prestamos/:id/frecuencia', admin.updatePrestamoFrecuencia);
 app.patch('/api/admin/prestamos/:id/recibo-fisico', admin.patchReciboFisicoPrestamo);
@@ -90,6 +92,9 @@ app.get('/api/admin/campo/resumen-cobro/:prestamoId', adminCampo.getResumenCobro
 app.post('/api/admin/campo/pago', adminCampo.postPagoCampo);
 app.post('/api/admin/campo/gestion-no-pago', adminCampo.postGestionNoPagoCampo);
 
+app.get('/api/cobrador/pagos/:cobradorId', cobrador.pagosPorFecha);
+app.get('/api/cobrador/prestamos/:cobradorId', cobrador.listPrestamosCobrador);
+app.post('/api/cobrador/prorrogas/:cobradorId', cobrador.aplicarProrrogaCobrador);
 app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
 app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);
 app.post('/api/cobrador/sync/push', cobrador.pushSync);

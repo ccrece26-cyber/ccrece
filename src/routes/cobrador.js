@@ -17,6 +17,7 @@ const { rangoDiaLocal } = require('../utils/fechasSql');
 const { ensureRutaForCobrador, agregarClienteARuta } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
+const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 
 /**
  * Clientes asignados al cobrador + ruta del dia.
@@ -1111,6 +1112,84 @@ async function crearSolicitudCorreccion(req, res) {
   }
 }
 
+async function listPrestamosCobrador(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const rows = await query(
+      `SELECT p.*, c.nombre_completo, c.cedula, c.telefono,
+              (SELECT COUNT(*) FROM Cuotas_Calendario cc
+               WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL
+                 AND cc.estado IN ('Programada', 'Parcial')) AS cuotas_pendientes
+       FROM Prestamos p
+       JOIN Clientes c ON p.cliente_id = c.id AND c.deleted_at IS NULL
+       WHERE p.estado = 'Activo' AND p.deleted_at IS NULL AND c.cobrador_id = ?
+       ORDER BY c.nombre_completo`,
+      [cobradorId]
+    );
+    return res.json({ success: true, data: rows });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
+async function aplicarProrrogaCobrador(req, res) {
+  const conn = await getConnection();
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId, conn);
+    const [prest] = await conn.execute(
+      `SELECT p.id FROM Prestamos p
+       JOIN Clientes c ON p.cliente_id = c.id
+       WHERE p.id = ? AND c.cobrador_id = ? AND p.estado = 'Activo' AND p.deleted_at IS NULL
+       LIMIT 1`,
+      [req.body.prestamo_id, cobradorId]
+    );
+    if (!prest.length) {
+      return res.status(403).json({ success: false, message: 'Préstamo no asignado a este cobrador.' });
+    }
+    await conn.beginTransaction();
+    const resultado = await aplicarProrrogaEnNube(conn, {
+      prestamo_id: req.body.prestamo_id,
+      semanas_extra: req.body.semanas_extra,
+      comentario: req.body.comentario || 'Prórroga cobrador',
+      operador_id: req.operadorId || cobradorId,
+    });
+    await conn.commit();
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function pagosPorFecha(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+    const rows = await query(
+      `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
+              pg.registrado_por_admin, pg.operador_id,
+              c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono,
+              p.saldo_pendiente, p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro,
+              u.nombre_completo AS cobrador_nombre
+       FROM Pagos pg
+       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+       INNER JOIN Clientes c ON p.cliente_id = c.id
+       LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
+       WHERE pg.deleted_at IS NULL AND pg.cobrador_id = ? AND DATE(pg.fecha_pago) = DATE(?)
+       ORDER BY pg.fecha_pago DESC`,
+      [cobradorId, fecha]
+    );
+    return res.json({ success: true, data: rows, fecha });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
 /** Cierre de caja registrado hoy en nube para el cobrador */
 async function cierreHoy(req, res) {
   try {
@@ -1130,4 +1209,13 @@ async function cierreHoy(req, res) {
   }
 }
 
-module.exports = { rutaDiaria, pushSync, syncAviso, crearSolicitudCorreccion, cierreHoy };
+module.exports = {
+  rutaDiaria,
+  pushSync,
+  syncAviso,
+  crearSolicitudCorreccion,
+  cierreHoy,
+  listPrestamosCobrador,
+  aplicarProrrogaCobrador,
+  pagosPorFecha,
+};

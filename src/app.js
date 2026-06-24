@@ -100,6 +100,7 @@ app.get('/api/cobrador/prestamos/:cobradorId', cobrador.listPrestamosCobrador);
 app.post('/api/cobrador/prorrogas/:cobradorId', cobrador.aplicarProrrogaCobrador);
 app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
 app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);
+app.post('/api/cobrador/cierre-caja/:cobradorId', cobrador.registrarCierreCaja);
 app.post('/api/cobrador/sync/push', cobrador.pushSync);
 app.get('/api/cobrador/sync/aviso/:cobradorId', cobrador.syncAviso);
 app.get('/api/cobrador/correcciones/:cobradorId', cobrador.getCorreccionesAdmin);

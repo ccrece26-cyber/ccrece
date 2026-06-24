@@ -1,3 +1,4 @@
+const { v4: uuidv4 } = require('uuid');
 const { query, getConnection } = require('../config/db');
 const { leerParametrosFinancieros } = require('../utils/parametrosFinancieros');
 const { nombreCompleto } = require('../utils/cliente');
@@ -345,6 +346,9 @@ async function pushSync(req, res) {
     } = req.body;
 
     await exigirUsuarioActivo(cobradorId || req.operadorId, conn);
+
+    const hoySync = hoyISO();
+    const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoySync);
 
     const prestamoIdsConPagos = new Set(
       pagos.map((p) => p.prestamo_id).filter(Boolean)
@@ -931,13 +935,19 @@ async function pushSync(req, res) {
           continue;
         }
         const [dupDia] = await conn.execute(
-          `SELECT id FROM Cierre_Caja
-           WHERE cobrador_id = ? AND deleted_at IS NULL AND DATE(fecha_cierre) = DATE(?)
+          `SELECT id, monto_efectivo, transacciones FROM Cierre_Caja
+           WHERE cobrador_id = ? AND deleted_at IS NULL
+             AND fecha_cierre >= ? AND fecha_cierre < ?
            LIMIT 1`,
-          [cobId, cc.fecha_cierre]
+          [cobId, diaIni, diaFin]
         );
         if (dupDia.length) {
-          synced.cierres.push(cc.id);
+          errores.push({
+            tipo: 'cierre_caja',
+            id: cc.id,
+            message: 'Ya existe un cierre de caja registrado hoy para este cobrador.',
+            cierre_existente: dupDia[0],
+          });
           continue;
         }
         await conn.execute(
@@ -1269,6 +1279,7 @@ async function pagosPorFecha(req, res) {
 async function cierreHoy(req, res) {
   try {
     const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
     const hoy = hoyISO();
     const { inicio, fin } = rangoDiaLocal(hoy);
     const rows = await query(
@@ -1280,9 +1291,78 @@ async function cierreHoy(req, res) {
        LIMIT 1`,
       [cobradorId, inicio, fin]
     );
-    return res.json({ success: true, cierre: rows[0] || null });
+    return res.json({ success: true, cierre: rows[0] || null, ya_cerrado: !!rows[0] });
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return responderErrorUsuario(res, e);
+  }
+}
+
+/** Registra cierre de caja del dia (rechaza duplicados). */
+async function registrarCierreCaja(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+
+    const hoy = hoyISO();
+    const { inicio, fin } = rangoDiaLocal(hoy);
+    const existente = await query(
+      `SELECT id, fecha_cierre, monto_efectivo, transacciones
+       FROM Cierre_Caja
+       WHERE cobrador_id = ? AND deleted_at IS NULL
+         AND fecha_cierre >= ? AND fecha_cierre < ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [cobradorId, inicio, fin]
+    );
+    if (existente.length) {
+      return res.status(409).json({
+        success: false,
+        ya_cerrado: true,
+        message: 'Ya registro el cierre de caja de hoy. Solo puede cerrar una vez por dia.',
+        cierre: existente[0],
+      });
+    }
+
+    const body = req.body || {};
+    const monto = Number(body.monto_efectivo);
+    const transacciones = Number(body.transacciones ?? 0);
+    if (!Number.isFinite(monto) || monto < 0) {
+      return res.status(400).json({ success: false, message: 'Monto de cierre invalido.' });
+    }
+    if (!Number.isFinite(transacciones) || transacciones < 0) {
+      return res.status(400).json({ success: false, message: 'Transacciones invalidas.' });
+    }
+
+    const id = body.id || uuidv4();
+    const latitud = body.latitud != null && body.latitud !== '' ? Number(body.latitud) : null;
+    const longitud = body.longitud != null && body.longitud !== '' ? Number(body.longitud) : null;
+
+    await query(
+      `INSERT INTO Cierre_Caja (id, cobrador_id, fecha_cierre, monto_efectivo, transacciones, observaciones, latitud, longitud, is_synced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      [
+        id,
+        cobradorId,
+        hoy,
+        monto,
+        transacciones,
+        body.observaciones || null,
+        latitud,
+        longitud,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      cierre: {
+        id,
+        fecha_cierre: hoy,
+        monto_efectivo: monto,
+        transacciones,
+      },
+    });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
   }
 }
 
@@ -1293,6 +1373,7 @@ module.exports = {
   getCorreccionesAdmin,
   crearSolicitudCorreccion,
   cierreHoy,
+  registrarCierreCaja,
   listPrestamosCobrador,
   aplicarProrrogaCobrador,
   pagosPorFecha,

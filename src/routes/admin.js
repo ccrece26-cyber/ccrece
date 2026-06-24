@@ -31,6 +31,8 @@ const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { aplicarMontoACuotas, revertirMontoDeCuotas } = require('../utils/registrarPagoNube');
+const { rangoDiaLocal } = require('../utils/fechasSql');
+const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
 
 const txt = (v) => {
@@ -853,7 +855,8 @@ async function seedDemoEsteli(req, res) {
 
 async function listPagosDelDia(req, res) {
   try {
-    const fecha = req.query.fecha || new Date().toISOString().split('T')[0];
+    const fecha = req.query.fecha || hoyISO();
+    const { inicio, fin } = rangoDiaLocal(fecha);
     const cobrador_id = req.query.cobrador_id || null;
     let sql = `
       SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
@@ -865,9 +868,9 @@ async function listPagosDelDia(req, res) {
       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
       INNER JOIN Clientes c ON p.cliente_id = c.id
       LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
-      WHERE pg.deleted_at IS NULL AND DATE(pg.fecha_pago) = DATE(?)
+      WHERE pg.deleted_at IS NULL AND pg.fecha_pago >= ? AND pg.fecha_pago < ?
     `;
-    const params = [fecha];
+    const params = [inicio, fin];
     if (cobrador_id) {
       sql += ' AND pg.cobrador_id = ?';
       params.push(cobrador_id);

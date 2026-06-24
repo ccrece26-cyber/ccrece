@@ -325,7 +325,7 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
   }
 
   const cierres = await query(
-    `SELECT cobrador_id, monto_efectivo, transacciones
+    `SELECT cobrador_id, id, monto_efectivo, transacciones
      FROM Cierre_Caja
      WHERE cobrador_id IN (${ph}) AND DATE(fecha_cierre) = DATE(?) AND deleted_at IS NULL`,
     [...cobradorIds, hoy]
@@ -364,7 +364,11 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
   const cierreMap = new Map(
     datos.cierres.map((c) => [
       c.cobrador_id,
-      { monto_efectivo: Number(c.monto_efectivo), transacciones: Number(c.transacciones) },
+      {
+        id: c.id,
+        monto_efectivo: Number(c.monto_efectivo),
+        transacciones: Number(c.transacciones),
+      },
     ])
   );
 

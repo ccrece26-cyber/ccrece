@@ -37,6 +37,7 @@ app.get('/api/licencia/estado', licencia.estadoLicencia);
 app.use('/api', guardEscrituraActiva);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
+app.post('/api/admin/cierre-caja/reabrir', admin.reabrirCierreCajaDia);
 app.get('/api/admin/kpis', admin.getKpis);
 app.get('/api/admin/respaldo-sql', admin.getRespaldoSql);
 app.get('/api/admin/reportes/:tipo', admin.getReporte);

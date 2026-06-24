@@ -1521,7 +1521,7 @@ async function getCumplimientoRuta(req, res) {
     if (cobradorId && cobradores.length) {
       const uno = await buildAgendaCobrador(query, cobradorId, fecha);
       const cierres = await query(
-        `SELECT monto_efectivo, transacciones FROM Cierre_Caja
+        `SELECT id, monto_efectivo, transacciones FROM Cierre_Caja
          WHERE cobrador_id = ? AND DATE(fecha_cierre) = DATE(?) AND deleted_at IS NULL LIMIT 1`,
         [cobradorId, fecha]
       );
@@ -1533,6 +1533,7 @@ async function getCumplimientoRuta(req, res) {
           ...uno.resumen,
           cierre_caja: cierres[0]
             ? {
+                id: cierres[0].id,
                 monto_efectivo: Number(cierres[0].monto_efectivo),
                 transacciones: Number(cierres[0].transacciones),
               }
@@ -1570,6 +1571,31 @@ async function getCumplimientoRuta(req, res) {
         },
         cobradores: filas,
       },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+/** Admin: reabrir cierre de caja de un cobrador en una fecha (soft delete). */
+async function reabrirCierreCajaDia(req, res) {
+  try {
+    const { fechaCalendarioISO } = require('../utils/diasCobro');
+    const { rangoDiaLocal } = require('../utils/fechasSql');
+    const cobradorId = req.body?.cobrador_id;
+    const fecha = req.body?.fecha || fechaCalendarioISO();
+    if (!cobradorId) {
+      return res.status(400).json({ success: false, message: 'cobrador_id requerido' });
+    }
+    const { inicio, fin } = rangoDiaLocal(fecha);
+    await query(
+      `UPDATE Cierre_Caja SET deleted_at = NOW(), updated_at = NOW()
+       WHERE cobrador_id = ? AND deleted_at IS NULL AND fecha_cierre >= ? AND fecha_cierre < ?`,
+      [cobradorId, inicio, fin]
+    );
+    return res.json({
+      success: true,
+      message: 'Dia reabierto. El cobrador puede volver a cerrar caja cuando termine.',
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -1839,6 +1865,7 @@ module.exports = {
   optimizarRuta,
   seedDemoEsteli,
   getCumplimientoRuta,
+  reabrirCierreCajaDia,
   validarCargaMasiva,
   importarCargaMasiva,
   validarCargaMasivaGarantias,

@@ -215,7 +215,7 @@ async function rutaDiaria(req, res) {
     };
 
     for (const c of clientes) {
-      const p = prestamos.find((x) => x.cliente_id === c.id);
+      const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
       if (p && debeSugerirCobroEnFecha(hoy, p)) {
         const cuotaPend = cuotas.find(
           (cc) => cc.prestamo_id === p.id && !esCuotaDiaDesembolso(cc, p)

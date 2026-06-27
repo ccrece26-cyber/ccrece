@@ -13,6 +13,7 @@ const ORDEN_TABLAS = [
   'Cuotas_Calendario',
   'Pagos',
   'Gestiones_No_Pago',
+  'Castigos_Perdida',
   'Historial_Prorrogas',
   'Renovaciones_Log',
   'Rutas',

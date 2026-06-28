@@ -21,6 +21,7 @@ const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertU
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
+const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
 
 /**
  * Clientes asignados al cobrador + ruta del dia.
@@ -329,6 +330,7 @@ async function pushSync(req, res) {
   const idMapFiadores = {};
   const fiadorIdPorPrestamo = {};
   const syncedFiadorIds = new Set();
+  const cobrosParaNotificar = [];
 
   try {
     await conn.beginTransaction();
@@ -869,6 +871,14 @@ async function pushSync(req, res) {
         }
 
         synced.pagos.push(p.id);
+        if (!Number(p.registrado_por_admin)) {
+          cobrosParaNotificar.push({
+            prestamo_id: p.prestamo_id,
+            cobrador_id: p.cobrador_id,
+            monto: montoEfectivo,
+            liquidacion: esLiquidacion,
+          });
+        }
         procesados++;
       } catch (err) {
         errores.push({ tipo: 'pago', id: p.id, message: err.message });
@@ -1049,6 +1059,42 @@ async function pushSync(req, res) {
     }
 
     await conn.commit();
+
+    if (cobrosParaNotificar.length) {
+      const lote = [...cobrosParaNotificar];
+      setImmediate(() => {
+        void (async () => {
+          try {
+            const ids = [...new Set(lote.map((c) => c.prestamo_id))];
+            const ph = ids.map(() => '?').join(',');
+            const meta = await query(
+              `SELECT p.id AS prestamo_id, c.nombre_completo AS cliente_nombre, u.nombre_completo AS cobrador_nombre
+               FROM Prestamos p
+               INNER JOIN Clientes c ON p.cliente_id = c.id
+               LEFT JOIN Usuarios u ON u.id = (
+                 SELECT pg.cobrador_id FROM Pagos pg WHERE pg.prestamo_id = p.id ORDER BY pg.fecha_pago DESC LIMIT 1
+               )
+               WHERE p.id IN (${ph})`,
+              ids
+            );
+            const mapMeta = new Map(meta.map((r) => [r.prestamo_id, r]));
+            const enriched = lote.map((c) => {
+              const m = mapMeta.get(c.prestamo_id);
+              return {
+                monto: c.monto,
+                liquidacion: c.liquidacion,
+                clienteNombre: m?.cliente_nombre,
+                cobradorNombre: m?.cobrador_nombre,
+              };
+            });
+            await notificarAdminsCobrosCobrador(query, enriched);
+          } catch (e) {
+            console.warn('[notify admins cobro]', e.message);
+          }
+        })();
+      });
+    }
+
     return res.json({
       success: errores.length === 0,
       procesados,

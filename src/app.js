@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
-const { login, cambiarPassword } = require('./routes/auth');
+const { login, cambiarPassword, registrarPushToken } = require('./routes/auth');
 const { syncMasivo } = require('./routes/pagos');
 const { pullChanges, pushGestiones, healthCheck } = require('./routes/sync');
 const admin = require('./routes/admin');
@@ -35,6 +35,8 @@ app.post('/api/licencia/verificar', licencia.verificarCodigo);
 app.get('/api/licencia/estado', licencia.estadoLicencia);
 
 app.use('/api', guardEscrituraActiva);
+
+app.post('/api/auth/push-token', registrarPushToken);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
 app.post('/api/admin/cierre-caja/reabrir', admin.reabrirCierreCajaDia);

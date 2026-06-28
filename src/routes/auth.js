@@ -108,4 +108,25 @@ async function cambiarPassword(req, res) {
   }
 }
 
-module.exports = { login, cambiarPassword };
+async function registrarPushToken(req, res) {
+  try {
+    const operadorId = req.operadorId || req.headers['x-operador-id'];
+    const token = String(req.body?.token || '').trim();
+    if (!operadorId) {
+      return res.status(400).json({ success: false, message: 'Operador no identificado.' });
+    }
+    if (!token || !token.startsWith('ExponentPushToken')) {
+      return res.status(400).json({ success: false, message: 'Token push invalido.' });
+    }
+    await query(
+      `UPDATE Usuarios SET expo_push_token = ?, push_token_at = NOW(), updated_at = NOW() WHERE id = ? AND deleted_at IS NULL`,
+      [token, operadorId]
+    );
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Push token error:', error.message);
+    return res.status(500).json({ success: false, message: 'Error interno del servidor.' });
+  }
+}
+
+module.exports = { login, cambiarPassword, registrarPushToken };

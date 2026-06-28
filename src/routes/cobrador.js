@@ -396,13 +396,15 @@ async function pushSync(req, res) {
               primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
               nombre_completo = ?, telefono = ?, direccion = ?, actividad_economica = ?,
               latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
+              latitud_cobro = COALESCE(?, latitud_cobro), longitud_cobro = COALESCE(?, longitud_cobro),
               cobrador_id = COALESCE(?, cobrador_id), is_synced = 1, updated_at = NOW()
              WHERE id = ?`,
             [
               c.primer_nombre || null, c.segundo_nombre || null,
               c.primer_apellido || null, c.segundo_apellido || null,
               nc, c.telefono || null, c.direccion || null, c.actividad_economica || null,
-              coord(c.latitud), coord(c.longitud), cobId, cloudId,
+              coord(c.latitud), coord(c.longitud), coord(c.latitud_cobro), coord(c.longitud_cobro),
+              cobId, cloudId,
             ]
           );
           idMapClientes[c.id] = cloudId;
@@ -970,18 +972,19 @@ async function pushSync(req, res) {
           synced.cierres.push(cc.id);
           continue;
         }
+        const fechaCierre = String(cc.fecha_cierre || hoySync).slice(0, 10);
         const [dupDia] = await conn.execute(
           `SELECT id, monto_efectivo, transacciones FROM Cierre_Caja
            WHERE cobrador_id = ? AND deleted_at IS NULL
              AND ${whereCierreCalendarioDia('fecha_cierre')}
            LIMIT 1`,
-          [cobId, hoySync]
+          [cobId, fechaCierre]
         );
         if (dupDia.length) {
           errores.push({
             tipo: 'cierre_caja',
             id: cc.id,
-            message: 'Ya existe un cierre de caja registrado hoy para este cobrador.',
+            message: `Ya existe un cierre de caja registrado para ${fechaCierre}.`,
             cierre_existente: dupDia[0],
           });
           continue;
@@ -992,7 +995,7 @@ async function pushSync(req, res) {
           [
             cc.id,
             cc.cobrador_id || cobradorId,
-            cc.fecha_cierre,
+            fechaCierre,
             cc.monto_efectivo,
             cc.transacciones || 0,
             cc.observaciones || null,
@@ -1311,12 +1314,12 @@ async function pagosPorFecha(req, res) {
   }
 }
 
-/** Cierre de caja registrado hoy en nube para el cobrador */
+/** Cierre de caja registrado en nube para el cobrador (fecha opcional). */
 async function cierreHoy(req, res) {
   try {
     const { cobradorId } = req.params;
     await exigirUsuarioActivo(cobradorId);
-    const hoy = hoyISO();
+    const fecha = String(req.query.fecha || hoyISO()).slice(0, 10);
     const rows = await query(
       `SELECT id, fecha_cierre, monto_efectivo, transacciones
        FROM Cierre_Caja
@@ -1324,9 +1327,58 @@ async function cierreHoy(req, res) {
          AND ${whereCierreCalendarioDia('fecha_cierre')}
        ORDER BY updated_at DESC
        LIMIT 1`,
-      [cobradorId, hoy]
+      [cobradorId, fecha]
     );
-    return res.json({ success: true, cierre: rows[0] || null, ya_cerrado: !!rows[0] });
+    return res.json({ success: true, cierre: rows[0] || null, ya_cerrado: !!rows[0], fecha });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
+function validarFechaCierre(fechaISO) {
+  const hoy = hoyISO();
+  const f = String(fechaISO || hoy).slice(0, 10);
+  if (f > hoy) return { ok: false, message: 'No puede cerrar caja de un dia futuro.' };
+  const limite = new Date(`${hoy}T12:00:00`);
+  limite.setDate(limite.getDate() - 30);
+  const limiteISO = limite.toISOString().slice(0, 10);
+  if (f < limiteISO) return { ok: false, message: 'Solo puede cerrar los ultimos 30 dias.' };
+  return { ok: true, fecha: f };
+}
+
+/** Resumen de arqueo para una fecha (hoy o dias anteriores). */
+async function resumenCierreCaja(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const val = validarFechaCierre(req.query.fecha);
+    if (!val.ok) return res.status(400).json({ success: false, message: val.message });
+    const { inicio, fin } = rangoDiaLocal(val.fecha);
+    const pagos = await query(
+      `SELECT COUNT(id) AS transacciones, COALESCE(SUM(monto_pagado), 0) AS monto_total
+       FROM Pagos
+       WHERE deleted_at IS NULL AND (cobrador_id = ? OR operador_id = ?)
+         AND fecha_pago >= ? AND fecha_pago < ?`,
+      [cobradorId, cobradorId, inicio, fin]
+    );
+    const cierre = await query(
+      `SELECT id, fecha_cierre, monto_efectivo, transacciones
+       FROM Cierre_Caja
+       WHERE cobrador_id = ? AND deleted_at IS NULL
+         AND ${whereCierreCalendarioDia('fecha_cierre')}
+       LIMIT 1`,
+      [cobradorId, val.fecha]
+    );
+    const row = pagos[0] || {};
+    const c = cierre[0] || null;
+    return res.json({
+      success: true,
+      fecha: val.fecha,
+      transacciones: c ? Number(c.transacciones) : Number(row.transacciones || 0),
+      monto_total: c ? Number(c.monto_efectivo) : Number(row.monto_total || 0),
+      ya_cerrado: !!c,
+      cierre: c,
+    });
   } catch (e) {
     return responderErrorUsuario(res, e);
   }
@@ -1338,7 +1390,11 @@ async function registrarCierreCaja(req, res) {
     const { cobradorId } = req.params;
     await exigirUsuarioActivo(cobradorId);
 
-    const hoy = hoyISO();
+    const body = req.body || {};
+    const val = validarFechaCierre(body.fecha);
+    if (!val.ok) return res.status(400).json({ success: false, message: val.message });
+    const fechaCierre = val.fecha;
+
     const existente = await query(
       `SELECT id, fecha_cierre, monto_efectivo, transacciones
        FROM Cierre_Caja
@@ -1346,18 +1402,17 @@ async function registrarCierreCaja(req, res) {
          AND ${whereCierreCalendarioDia('fecha_cierre')}
        ORDER BY updated_at DESC
        LIMIT 1`,
-      [cobradorId, hoy]
+      [cobradorId, fechaCierre]
     );
     if (existente.length) {
       return res.status(409).json({
         success: false,
         ya_cerrado: true,
-        message: 'Ya registro el cierre de caja de hoy. Solo puede cerrar una vez por dia.',
+        message: `Ya registro el cierre de caja del ${fechaCierre}.`,
         cierre: existente[0],
       });
     }
 
-    const body = req.body || {};
     const monto = Number(body.monto_efectivo);
     const transacciones = Number(body.transacciones ?? 0);
     if (!Number.isFinite(monto) || monto < 0) {
@@ -1377,7 +1432,7 @@ async function registrarCierreCaja(req, res) {
       [
         id,
         cobradorId,
-        hoy,
+        fechaCierre,
         monto,
         transacciones,
         body.observaciones || null,
@@ -1390,7 +1445,7 @@ async function registrarCierreCaja(req, res) {
       success: true,
       cierre: {
         id,
-        fecha_cierre: hoy,
+        fecha_cierre: fechaCierre,
         monto_efectivo: monto,
         transacciones,
       },
@@ -1407,6 +1462,7 @@ module.exports = {
   getCorreccionesAdmin,
   crearSolicitudCorreccion,
   cierreHoy,
+  resumenCierreCaja,
   registrarCierreCaja,
   listPrestamosCobrador,
   aplicarProrrogaCobrador,

@@ -6,6 +6,8 @@ const {
   fechaCalendarioISO,
 } = require('./diasCobro');
 const { rangoDiaLocal } = require('./fechasSql');
+const { analizarVisitaGps, resumenGpsAgenda, refCoordsCliente } = require('./gpsCumplimiento');
+const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
 
 const MAPA = ['DOMINGO', 'LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'];
 
@@ -83,10 +85,10 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
 
     let etiqueta_visita = extra.etiqueta_visita ?? null;
     if (!etiqueta_visita && pg) {
-      if (esLiquidacion) etiqueta_visita = 'Liquidación anticipada';
-      else if (Number(pg.registrado_por_admin) === 1) etiqueta_visita = 'Cobrado por administrador';
+      etiqueta_visita = etiquetaVisitaDesdePago(pg, esLiquidacion);
     }
 
+    const ref = refCoordsCliente(c);
     agenda.push({
       prestamo_id: p.id,
       monto_programado,
@@ -100,9 +102,22 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
       saldo_pendiente: p.saldo_pendiente,
       tipo_visita,
       estado_visita,
+      registrado_por_admin: pg ? Number(pg.registrado_por_admin) === 1 : false,
       pago_hoy_id: extra.pago_hoy_id ?? pg?.id ?? null,
       motivo_no_pago: gestionPorPrestamo.get(p.id)?.motivo ?? null,
       etiqueta_visita,
+      latitud: c.latitud,
+      longitud: c.longitud,
+      latitud_cobro: c.latitud_cobro,
+      longitud_cobro: c.longitud_cobro,
+      ref_lat: ref?.lat ?? null,
+      ref_lng: ref?.lng ?? null,
+      ...analizarVisitaGps(c, {
+        pago: pg,
+        gestion: gestionPorPrestamo.get(p.id),
+        estadoVisita: estado_visita,
+        tipoVisita: tipo_visita,
+      }),
     });
   };
 
@@ -125,11 +140,7 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
         monto_programado: Number(pg.monto_pagado),
         monto_cobrado: Number(pg.monto_pagado),
         tipo_visita: esLiquidacion ? 'liquidado' : 'cobrado',
-        etiqueta_visita: esLiquidacion
-          ? 'Liquidación anticipada'
-          : ev === 'cobrado_admin'
-            ? 'Cobrado por administrador'
-            : null,
+        etiqueta_visita: etiquetaVisitaDesdePago(pg, esLiquidacion),
         estado_visita: ev,
         pago_hoy_id: pg.id,
       });
@@ -161,6 +172,7 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
       visitadas,
       porcentaje: total ? Math.round((visitadas / total) * 100) : 0,
       monto_cobrado,
+      gps: resumenGpsAgenda(agenda),
     },
     pagos_hoy: pagosRuta,
     gestiones_hoy: gestionesRuta,

@@ -56,6 +56,8 @@ const camposCliente = (c) => ({
   actividad_economica: c.actividad_economica || null,
   latitud: c.latitud != null && c.latitud !== '' ? Number(c.latitud) : null,
   longitud: c.longitud != null && c.longitud !== '' ? Number(c.longitud) : null,
+  latitud_cobro: c.latitud_cobro != null && c.latitud_cobro !== '' ? Number(c.latitud_cobro) : null,
+  longitud_cobro: c.longitud_cobro != null && c.longitud_cobro !== '' ? Number(c.longitud_cobro) : null,
   cobrador_id: c.cobrador_id || null,
 });
 
@@ -193,12 +195,13 @@ async function updateCliente(req, res) {
         primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
         nombre_completo = ?, cedula = ?, telefono = ?, direccion = ?, actividad_economica = ?,
         latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
+        latitud_cobro = COALESCE(?, latitud_cobro), longitud_cobro = COALESCE(?, longitud_cobro),
         cobrador_id = ?, updated_at = NOW()
        WHERE id = ? AND deleted_at IS NULL`,
       [
         c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
         c.nombre_completo, c.cedula, c.telefono, c.direccion, c.actividad_economica,
-        c.latitud, c.longitud, c.cobrador_id, id,
+        c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro, c.cobrador_id, id,
       ]
     );
 

@@ -1,6 +1,7 @@
 const { query } = require('../config/db');
 const { leerParametrosFinancieros } = require('../utils/parametrosFinancieros');
 const { initSecuenciaCliente } = require('../utils/clienteId');
+const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
 const {
   diaCobroHoy,
   montoVisitaHoy,
@@ -123,17 +124,6 @@ async function loadAgendaAdminHoy(opciones = {}) {
 
     if (clienteIds.length) {
       const ph2 = clienteIds.map(() => '?').join(',');
-      pagos_hoy = await query(
-        `SELECT pg.*, p.cliente_id, p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro,
-                p.saldo_pendiente, c.nombre_completo, c.telefono
-         FROM Pagos pg
-         INNER JOIN Prestamos p ON pg.prestamo_id = p.id
-         INNER JOIN Clientes c ON p.cliente_id = c.id
-         WHERE pg.fecha_pago >= ? AND pg.fecha_pago < ?
-           AND pg.deleted_at IS NULL
-           AND p.cliente_id IN (${ph2})`,
-        [diaIni, diaFin, ...clienteIds]
-      );
       gestiones_hoy = await query(
         `SELECT g.*, p.cliente_id
          FROM Gestiones_No_Pago g
@@ -145,10 +135,59 @@ async function loadAgendaAdminHoy(opciones = {}) {
       );
     }
 
+    pagos_hoy = await query(
+      `SELECT pg.*, p.cliente_id, p.estado, p.saldo_pendiente, p.fecha_desembolso, p.plazo_semanas,
+              p.dias_de_cobro, c.nombre_completo, c.telefono
+       FROM Pagos pg
+       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+       INNER JOIN Clientes c ON p.cliente_id = c.id
+       WHERE pg.fecha_pago >= ? AND pg.fecha_pago < ?
+         AND pg.deleted_at IS NULL AND c.deleted_at IS NULL
+         ${soloRuta ? 'AND c.cobrador_id = ?' : ''}`,
+      soloRuta ? [diaIni, diaFin, adminId] : [diaIni, diaFin]
+    );
+
+    const prestamoPorId = new Map(prestamos.map((p) => [p.id, p]));
+    let clienteMap = new Map(clientes.map((c) => [c.id, c]));
+
+    const extraPrestamoIds = [
+      ...new Set(pagos_hoy.map((pg) => pg.prestamo_id).filter((id) => id && !prestamoPorId.has(id))),
+    ];
+    if (extraPrestamoIds.length) {
+      const phE = extraPrestamoIds.map(() => '?').join(',');
+      const extras = await query(
+        `SELECT * FROM Prestamos WHERE id IN (${phE}) AND deleted_at IS NULL`,
+        extraPrestamoIds
+      );
+      for (const p of extras) {
+        prestamoPorId.set(p.id, p);
+        prestamos.push(p);
+      }
+    }
+
+    const extraClienteIds = [
+      ...new Set(pagos_hoy.map((pg) => pg.cliente_id).filter((id) => id && !clienteMap.has(id))),
+    ];
+    if (extraClienteIds.length) {
+      const phC = extraClienteIds.map(() => '?').join(',');
+      const extrasC = await query(
+        `SELECT c.*, COALESCE(rc.orden_visita, 999) AS orden_visita,
+                u.nombre_completo AS cobrador_asignado, c.cobrador_id AS cobrador_asignado_id
+         FROM Clientes c
+         LEFT JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
+         LEFT JOIN Usuarios u ON c.cobrador_id = u.id
+         WHERE c.id IN (${phC}) AND c.deleted_at IS NULL`,
+        extraClienteIds
+      );
+      for (const c of extrasC) {
+        clienteMap.set(c.id, c);
+        clientes.push(c);
+      }
+    }
+
     const pagoPorPrestamo = new Map(pagos_hoy.map((pg) => [pg.prestamo_id, pg]));
     const gestionPorPrestamo = new Map(gestiones_hoy.map((g) => [g.prestamo_id, g]));
     const prestamosEnAgenda = new Set();
-    const prestamoPorId = new Map(prestamos.map((p) => [p.id, p]));
 
     const estadoVisitaDesdePago = (prestamoId) => {
       const pg = pagoPorPrestamo.get(prestamoId);
@@ -198,6 +237,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
         tipo_visita: extra.tipo_visita || 'activo',
         etiqueta_visita:
           extra.etiqueta_visita ||
+          etiquetaVisitaDesdePago(pagoPorPrestamo.get(p.id), extra.tipo_visita === 'liquidado') ||
           (ev === 'cobrado_admin' ? 'Cobrado por administrador' : null),
         estado_visita: ev,
         pago_hoy_id: extra.pago_hoy_id ?? pagoPorPrestamo.get(p.id)?.id ?? null,
@@ -205,32 +245,37 @@ async function loadAgendaAdminHoy(opciones = {}) {
     };
 
     for (const c of clientes) {
-      const p = prestamos.find((x) => x.cliente_id === c.id);
+      const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
       if (p && debeSugerirCobroEnFecha(hoy, p)) {
         const cuotaPend = cuotas.find(
           (cc) => cc.prestamo_id === p.id && !esCuotaDiaDesembolso(cc, p)
         );
         pushAgendaItem(c, p, cuotaPend);
       }
-      for (const pg of pagos_hoy.filter((x) => x.cliente_id === c.id)) {
-        if (prestamosEnAgenda.has(pg.prestamo_id)) continue;
-        const pExtra = prestamoPorId.get(pg.prestamo_id);
-        if (!pExtra) continue;
-        const esLiquidacion = pExtra.estado === 'Pagado' || Number(pExtra.saldo_pendiente || 0) <= 0;
-        const ev = Number(pg.registrado_por_admin) === 1 ? 'cobrado_admin' : 'cobrado';
-        pushAgendaItem(c, pExtra, null, {
-          monto_programado: Number(pg.monto_pagado),
-          monto_pagado: Number(pg.monto_pagado),
-          estado_cuota: 'Pagada',
-          tipo_visita: esLiquidacion ? 'liquidado' : 'cobrado',
-          etiqueta_visita: esLiquidacion ? 'Liquidación' : ev === 'cobrado_admin' ? 'Cobrado por administrador' : 'Cobro registrado',
-          estado_visita: ev,
-          pago_hoy_id: pg.id,
-        });
-      }
+    }
+
+    for (const pg of pagos_hoy) {
+      if (prestamosEnAgenda.has(pg.prestamo_id)) continue;
+      const c = clienteMap.get(pg.cliente_id);
+      const pExtra = prestamoPorId.get(pg.prestamo_id);
+      if (!c || !pExtra) continue;
+      const esLiquidacion =
+        pExtra.estado === 'Pagado' || Number(pExtra.saldo_pendiente || 0) <= 0.01;
+      const ev = Number(pg.registrado_por_admin) === 1 ? 'cobrado_admin' : 'cobrado';
+      pushAgendaItem(c, pExtra, null, {
+        monto_programado: Number(pg.monto_pagado),
+        monto_pagado: Number(pg.monto_pagado),
+        estado_cuota: 'Pagada',
+        tipo_visita: esLiquidacion ? 'liquidado' : 'cobrado',
+        etiqueta_visita: etiquetaVisitaDesdePago(pg, esLiquidacion) || 'Cobro registrado',
+        estado_visita: ev,
+        pago_hoy_id: pg.id,
+      });
     }
 
     agenda.sort((a, b) => {
+      if (a.tipo_visita === 'liquidado' && b.tipo_visita !== 'liquidado') return -1;
+      if (a.tipo_visita !== 'liquidado' && b.tipo_visita === 'liquidado') return 1;
       const o = (a.orden_visita ?? 999) - (b.orden_visita ?? 999);
       if (o !== 0) return o;
       return String(a.nombre_completo || '').localeCompare(String(b.nombre_completo || ''));

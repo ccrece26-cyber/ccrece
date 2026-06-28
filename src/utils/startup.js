@@ -33,6 +33,8 @@ async function migrarTablasSync() {
   const alters = [
     'ALTER TABLE Pagos ADD COLUMN editado_por_admin_at DATETIME DEFAULT NULL',
     'ALTER TABLE Clientes ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
+    'ALTER TABLE Clientes ADD COLUMN latitud_cobro DOUBLE DEFAULT NULL',
+    'ALTER TABLE Clientes ADD COLUMN longitud_cobro DOUBLE DEFAULT NULL',
     `CREATE TABLE IF NOT EXISTS Solicitudes_Correccion_Cobro (
       id VARCHAR(36) NOT NULL PRIMARY KEY,
       pago_id VARCHAR(36) NOT NULL,

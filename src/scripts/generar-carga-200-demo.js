@@ -83,17 +83,39 @@ function escCsv(v) {
   return s.includes(',') || s.includes('"') ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function filaCliente(i, cobradorEmail, perfil) {
-  const base = NOMBRES[i % NOMBRES.length];
-  const variante = Math.floor(i / NOMBRES.length);
-  const v = ['Antonio', 'Rosa', 'Luis', 'Carmen', 'Jorge', 'Lucia', 'Ricardo', 'Silvia', 'Ernesto', 'Adela'][
-    variante % 10
+const NOMBRES_POOL = (() => {
+  const PRIMEROS = [
+    'Maria', 'Jose', 'Ana', 'Carlos', 'Lucia', 'Pedro', 'Rosa', 'Oscar', 'Carmen', 'Luis',
+    'Patricia', 'Miguel', 'Sandra', 'Francisco', 'Glenda', 'Walter', 'Yolanda', 'Marvin', 'Xiomara', 'Boris',
   ];
-  const p = [...base];
-  if (variante > 0) {
-    p[1] = p[1] && p[1] !== p[0] ? p[1] : v;
-    if (variante % 3 === 0) p[3] = p[3] ? `${p[3]} ${v}` : v;
+  const SEGUNDOS = [
+    'Elena', 'Alberto', 'Beatriz', 'Daniel', 'Marina', 'Antonio', 'Isabel', 'Javier', 'Marisol', 'Josefina',
+    'Alejandra', 'Angel', 'Patricia', 'Luis', 'Cristina', 'Antonio', 'Ivan', 'Lucia', 'Eduardo', 'Reyna',
+  ];
+  const APELLIDOS1 = [
+    'Lopez', 'Garcia', 'Martinez', 'Rivas', 'Mejia', 'Torres', 'Zelaya', 'Baltodano', 'Corea', 'Jarquin',
+    'Urbina', 'Tellez', 'Blandon', 'Guido', 'Duarte', 'Gutierrez', 'Centeno', 'Montenegro', 'Flores', 'Herrera',
+  ];
+  const APELLIDOS2 = [
+    'Ruiz', 'Herrera', 'Castillo', 'Navarro', 'Chavez', 'Morales', 'Ortega', 'Pineda', 'Ramos', 'Cruz',
+    'Reyes', 'Silva', 'Aguilar', 'Delgado', 'Vargas', 'Jimenez', 'Mendoza', 'Suarez', 'Espinoza', 'Perez',
+  ];
+  const pool = [];
+  outer: for (let a = 0; a < PRIMEROS.length; a += 1) {
+    for (let b = 0; b < SEGUNDOS.length; b += 1) {
+      for (let c = 0; c < APELLIDOS1.length; c += 1) {
+        for (let d = 0; d < APELLIDOS2.length; d += 1) {
+          pool.push([PRIMEROS[a], SEGUNDOS[b], APELLIDOS1[c], APELLIDOS2[d]]);
+          if (pool.length >= TOTAL) break outer;
+        }
+      }
+    }
   }
+  return pool;
+})();
+
+function filaCliente(i, cobradorEmail, perfil) {
+  const p = NOMBRES_POOL[i] || NOMBRES[i % NOMBRES.length];
   const idx = i + 1;
   const monto = [3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000][i % 8];
   const plazo = perfil.vencido ? [12, 14, 16, 18][i % 4] : [16, 20, 24, 28, 32][i % 5];

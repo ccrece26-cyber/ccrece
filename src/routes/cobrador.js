@@ -1603,8 +1603,9 @@ async function clientesGps(req, res) {
     const { cobradorId } = req.params;
     await exigirUsuarioActivo(cobradorId);
     const rows = await query(
-      `SELECT DISTINCT c.id, c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro,
-              c.direccion, c.updated_at
+      `SELECT DISTINCT c.id, c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
+              c.nombre_completo, c.cedula, c.telefono, c.direccion,
+              c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro, c.updated_at
        FROM Clientes c
        INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
        INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1

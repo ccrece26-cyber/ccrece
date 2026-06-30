@@ -84,7 +84,16 @@ function escCsv(v) {
 }
 
 function filaCliente(i, cobradorEmail, perfil) {
-  const p = NOMBRES[i % NOMBRES.length];
+  const base = NOMBRES[i % NOMBRES.length];
+  const variante = Math.floor(i / NOMBRES.length);
+  const v = ['Antonio', 'Rosa', 'Luis', 'Carmen', 'Jorge', 'Lucia', 'Ricardo', 'Silvia', 'Ernesto', 'Adela'][
+    variante % 10
+  ];
+  const p = [...base];
+  if (variante > 0) {
+    p[1] = p[1] && p[1] !== p[0] ? p[1] : v;
+    if (variante % 3 === 0) p[3] = p[3] ? `${p[3]} ${v}` : v;
+  }
   const idx = i + 1;
   const monto = [3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000][i % 8];
   const plazo = perfil.vencido ? [12, 14, 16, 18][i % 4] : [16, 20, 24, 28, 32][i % 5];

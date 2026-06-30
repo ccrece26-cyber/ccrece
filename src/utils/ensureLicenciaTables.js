@@ -13,6 +13,7 @@ async function migrarColumnasLicencia() {
     'ALTER TABLE Licencias_Codigos ADD COLUMN geo_region VARCHAR(80) DEFAULT NULL',
     'ALTER TABLE Licencias_Codigos ADD COLUMN geo_pais VARCHAR(80) DEFAULT NULL',
     'ALTER TABLE Licencias_Codigos ADD COLUMN geo_isp VARCHAR(80) DEFAULT NULL',
+    'ALTER TABLE Licencias_Codigos ADD COLUMN email_enviado_at DATETIME DEFAULT NULL',
   ];
   for (const sql of alters) {
     try {

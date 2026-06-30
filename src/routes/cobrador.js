@@ -1597,6 +1597,27 @@ async function registrarCierreCaja(req, res) {
   }
 }
 
+/** Coordenadas GPS de clientes en ruta (ligero, para sync sin redescargar toda la ruta). */
+async function clientesGps(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const rows = await query(
+      `SELECT DISTINCT c.id, c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro,
+              c.direccion, c.updated_at
+       FROM Clientes c
+       INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
+       INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1
+       WHERE c.deleted_at IS NULL AND c.cobrador_id = ?
+       ORDER BY c.id`,
+      [cobradorId, cobradorId]
+    );
+    return res.json({ success: true, clientes: rows, serverTime: new Date().toISOString() });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
 async function historialPrestamosCliente(req, res) {
   try {
     const { cobradorId, clienteId } = req.params;
@@ -1627,6 +1648,7 @@ async function historialPrestamosCliente(req, res) {
 
 module.exports = {
   rutaDiaria,
+  clientesGps,
   pushSync,
   syncAviso,
   getCorreccionesAdmin,

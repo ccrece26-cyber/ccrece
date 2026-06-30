@@ -9,6 +9,7 @@ const { ensureLicenciaTables } = require('../utils/ensureLicenciaTables');
 
 const CODIGO_EXPIRA_HORAS = 48;
 const MAX_SOLICITUDES_HORA = 5;
+const MIN_SEGUNDOS_ENTRE_CORREOS = 90;
 
 function generarCodigo6() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -29,6 +30,19 @@ async function solicitudesRecientes(deviceId) {
     [deviceId]
   );
   return Number(row?.n || 0);
+}
+
+/** Evita reenvío si ya se mandó correo hace pocos segundos (doble tap o reintento HTTP). */
+async function correoRecienteEnviado(deviceId) {
+  const [row] = await query(
+    `SELECT id, created_at FROM Licencias_Codigos
+     WHERE device_id = ? AND email_enviado_at IS NOT NULL
+       AND email_enviado_at > DATE_SUB(NOW(), INTERVAL ? SECOND)
+       AND used_at IS NULL AND expires_at > NOW()
+     ORDER BY email_enviado_at DESC LIMIT 1`,
+    [deviceId, MIN_SEGUNDOS_ENTRE_CORREOS]
+  );
+  return row || null;
 }
 
 function txtCampo(v, max) {
@@ -90,6 +104,16 @@ async function solicitarCodigo(req, res) {
       });
     }
 
+    const envioPrevio = await correoRecienteEnviado(deviceId);
+    if (envioPrevio) {
+      return res.json({
+        success: true,
+        message: `Ya se envió un código a ${ADMIN_EMAIL} hace unos segundos. Revise su correo (y spam).`,
+        throttled: true,
+        expiraHoras: CODIGO_EXPIRA_HORAS,
+      });
+    }
+
     const codigo = generarCodigo6();
     const codigoHash = await bcrypt.hash(codigo, 10);
     const id = uuidv4();
@@ -117,7 +141,9 @@ async function solicitarCodigo(req, res) {
       ]
     );
 
-    await enviarCodigoActivacion({ codigo, deviceId, etiqueta, metaDispositivo });
+    await enviarCodigoActivacion({ codigo, deviceId, etiqueta, metaDispositivo, idempotencyKey: id });
+
+    await query(`UPDATE Licencias_Codigos SET email_enviado_at = NOW() WHERE id = ?`, [id]);
 
     return res.json({
       success: true,

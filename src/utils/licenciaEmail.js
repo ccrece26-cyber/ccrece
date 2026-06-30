@@ -54,7 +54,7 @@ function bloqueMetaTexto(meta = {}) {
   return lineas.length ? `\n${lineas.join('\n')}` : '';
 }
 
-async function enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo = {} }) {
+async function enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo = {}, idempotencyKey }) {
   const dispositivo = etiqueta || deviceId;
   const from = process.env.RESEND_FROM || 'Credi Crece <onboarding@resend.dev>';
   const metaHtml = bloqueMetaHtml(metaDispositivo);
@@ -67,12 +67,16 @@ async function enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo = {
     ${metaHtml}
     <p>Válido 48 horas. Comparta este código con el cliente.</p>
   `;
+  const headers = {
+    Authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
+    'Content-Type': 'application/json',
+  };
+  if (idempotencyKey) {
+    headers['Idempotency-Key'] = String(idempotencyKey);
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify({
       from,
       to: [ADMIN_EMAIL],
@@ -90,9 +94,9 @@ async function enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo = {
   return { enviadoA: ADMIN_EMAIL };
 }
 
-async function enviarCodigoActivacion({ codigo, deviceId, etiqueta, metaDispositivo = {} }) {
+async function enviarCodigoActivacion({ codigo, deviceId, etiqueta, metaDispositivo = {}, idempotencyKey }) {
   if (resendConfigurado()) {
-    return enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo });
+    return enviarPorResend({ codigo, deviceId, etiqueta, metaDispositivo, idempotencyKey });
   }
 
   if (!smtpConfigurado()) {

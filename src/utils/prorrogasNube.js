@@ -29,7 +29,7 @@ async function contarSemanasRestantes(conn, prestamoId, cuotaSemanal) {
 }
 
 /**
- * Prórroga con interés congelado: redistribuye saldo en más semanas y extiende calendario.
+ * Prórroga con interés congelado: extiende calendario sin cambiar cuotas ni sumar interés.
  */
 async function aplicarProrrogaEnNube(conn, opts) {
   const {
@@ -62,10 +62,22 @@ async function aplicarProrrogaEnNube(conn, opts) {
   const frecuencia = dias.length || 1;
   const cuotaSemanalActual = Number(prestamo.cuota_semanal_base) || 0;
 
+  const [cuotaRow] = await conn.execute(
+    `SELECT monto_programado FROM Cuotas_Calendario
+     WHERE prestamo_id = ? AND deleted_at IS NULL AND estado IN ('Programada', 'Parcial')
+     ORDER BY fecha_programada ASC LIMIT 1`,
+    [prestamoId]
+  );
+  let cuotaPorDia = Number(cuotaRow[0]?.monto_programado) || 0;
+  if (cuotaPorDia <= 0 && cuotaSemanalActual > 0) {
+    cuotaPorDia = Number((cuotaSemanalActual / frecuencia).toFixed(2));
+  }
+  if (cuotaPorDia <= 0) {
+    throw new Error('No se pudo determinar el monto de la cuota actual.');
+  }
+
   const semanasRestantes = await contarSemanasRestantes(conn, prestamoId, cuotaSemanalActual);
   const plazoRestante = semanasRestantes + extra;
-  const nuevaCuotaSemanal = Number((saldo / plazoRestante).toFixed(2));
-  const cuotaPorDia = Number((nuevaCuotaSemanal / frecuencia).toFixed(2));
 
   const prorrogaId = uuidv4();
   const fecha = new Date().toISOString();
@@ -75,26 +87,16 @@ async function aplicarProrrogaEnNube(conn, opts) {
       id, prestamo_id, semanas_extra, saldo_anterior, nueva_cuota_semanal,
       fecha_prorroga, comentario, is_synced
     ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
-    [prorrogaId, prestamoId, extra, saldo, nuevaCuotaSemanal, fecha, comentario || null]
+    [prorrogaId, prestamoId, extra, saldo, cuotaSemanalActual, fecha, comentario || null]
   );
 
   await conn.execute(
     `UPDATE Prestamos SET
       plazo_semanas = plazo_semanas + ?,
-      cuota_semanal_base = ?,
       updated_at = NOW(),
       is_synced = 1
      WHERE id = ?`,
-    [extra, nuevaCuotaSemanal, prestamoId]
-  );
-
-  await conn.execute(
-    `UPDATE Cuotas_Calendario SET
-      monto_programado = ?,
-      updated_at = NOW(),
-      is_synced = 1
-     WHERE prestamo_id = ? AND deleted_at IS NULL AND estado IN ('Programada', 'Parcial')`,
-    [cuotaPorDia, prestamoId]
+    [extra, prestamoId]
   );
 
   const [ultima] = await conn.execute(
@@ -128,12 +130,14 @@ async function aplicarProrrogaEnNube(conn, opts) {
 
   return {
     prorrogaId,
-    nuevaCuotaSemanal,
+    nuevaCuotaSemanal: cuotaSemanalActual,
     cuotaPorDiaDeCobro: cuotaPorDia,
     plazoRestante,
     semanasRestantes,
     semanasExtra: extra,
     saldoPendiente: saldo,
+    cuotaSinCambio: true,
+    visitasAgregadas: agendaExtra.length,
     operador_id: operadorId,
   };
 }

@@ -1,7 +1,8 @@
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 
 async function enviarExpoPush(messages) {
-  if (!messages.length) return;
+  if (!messages.length) return { ok: 0, errores: [] };
+  const errores = [];
   try {
     const res = await fetch(EXPO_PUSH_URL, {
       method: 'POST',
@@ -11,35 +12,61 @@ async function enviarExpoPush(messages) {
       },
       body: JSON.stringify(messages.slice(0, 100)),
     });
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      console.warn('[expo-push] HTTP', res.status, txt.slice(0, 200));
+      const txt = JSON.stringify(data).slice(0, 300);
+      console.warn('[expo-push] HTTP', res.status, txt);
+      return { ok: 0, errores: [{ status: res.status, message: txt }] };
     }
+    const tickets = data?.data || [];
+    let ok = 0;
+    for (const t of tickets) {
+      if (t.status === 'ok') {
+        ok += 1;
+      } else {
+        errores.push(t);
+        console.warn('[expo-push] ticket error:', t.message || t.details?.error, t.details);
+      }
+    }
+    return { ok, errores };
   } catch (e) {
     console.warn('[expo-push]', e.message);
+    return { ok: 0, errores: [{ message: e.message }] };
   }
 }
 
 async function tokensAdminsActivos(query) {
   const rows = await query(
-    `SELECT u.expo_push_token AS token
+    `SELECT u.id, u.expo_push_token AS token
      FROM Usuarios u
      INNER JOIN Roles r ON u.rol_id = r.id
      WHERE r.nombre = 'ADMIN' AND u.activo = 1 AND u.deleted_at IS NULL
        AND u.expo_push_token IS NOT NULL AND TRIM(u.expo_push_token) != ''`
   );
-  return [...new Set(rows.map((r) => String(r.token).trim()).filter(Boolean))];
+  return rows
+    .map((r) => ({ id: r.id, token: String(r.token).trim() }))
+    .filter((r) => r.token.startsWith('ExponentPushToken'));
+}
+
+async function limpiarTokensInvalidos(_query, errores = []) {
+  for (const e of errores) {
+    if (e?.details?.error === 'DeviceNotRegistered') {
+      console.warn('[expo-push] token expirado — el admin debe abrir la app y activar notificaciones');
+    }
+  }
 }
 
 /**
  * Notifica a admins cuando un cobrador sincroniza cobros (un push por lote, bajo consumo).
- * @param {Function} query
- * @param {Array<{ monto: number, liquidacion?: boolean, clienteNombre?: string, cobradorNombre?: string }>} cobros
  */
 async function notificarAdminsCobrosCobrador(query, cobros = []) {
   if (!cobros.length) return;
-  const tokens = await tokensAdminsActivos(query);
-  if (!tokens.length) return;
+
+  const admins = await tokensAdminsActivos(query);
+  if (!admins.length) {
+    console.warn('[expo-push] sin tokens admin — abra la app admin y active notificaciones');
+    return;
+  }
 
   const total = cobros.reduce((s, c) => s + Number(c.monto || 0), 0);
   const cobrador = cobros[0]?.cobradorNombre || 'Cobrador';
@@ -56,8 +83,8 @@ async function notificarAdminsCobrosCobrador(query, cobros = []) {
     body = `${cobrador} · Total C$${total.toFixed(2)}${hayLiquidacion ? ' (incl. liquidación)' : ''}`;
   }
 
-  const messages = tokens.map((to) => ({
-    to,
+  const messages = admins.map(({ token }) => ({
+    to: token,
     title: `Credi Crece · ${title}`,
     body,
     sound: 'default',
@@ -71,7 +98,11 @@ async function notificarAdminsCobrosCobrador(query, cobros = []) {
     },
   }));
 
-  await enviarExpoPush(messages);
+  const result = await enviarExpoPush(messages);
+  console.log('[expo-push] admin cobros:', result.ok, '/', messages.length, 'tokens');
+  if (result.errores?.length) {
+    await limpiarTokensInvalidos(query, result.errores);
+  }
 }
 
-module.exports = { notificarAdminsCobrosCobrador, enviarExpoPush };
+module.exports = { notificarAdminsCobrosCobrador, enviarExpoPush, tokensAdminsActivos };

@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { calcularLiquidacionAnticipada } = require('./finanzasNube');
 const { exigirUsuarioActivo } = require('./assertUsuarioActivo');
 const { rangoDiaLocal } = require('./fechasSql');
+const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
 
 async function resolverCobradorAsignado(conn, prestamoId) {
   const [rows] = await conn.execute(
@@ -141,8 +142,8 @@ async function registrarPagoEnNube(conn, opts) {
 
   await conn.execute(
     `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
-      registrado_por_admin, operador_id, is_synced)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 1)`,
+      registrado_por_admin, operador_id, is_synced, editado_por_admin_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 1, NOW())`,
     [pagoId, prestamoId, cobradorRegistro, montoEfectivo, fecha, latitud, longitud, operadorId]
   );
 
@@ -170,6 +171,9 @@ async function registrarPagoEnNube(conn, opts) {
     );
   } else {
     await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
+    if (estadoPrestamo === 'Pagado') {
+      await voidarCuotasRestantesAlCerrar(conn, prestamoId);
+    }
     await conn.execute(
       `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
       [nuevoSaldo, estadoPrestamo, prestamoId]

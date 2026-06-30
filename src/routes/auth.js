@@ -110,7 +110,8 @@ async function cambiarPassword(req, res) {
 
 async function registrarPushToken(req, res) {
   try {
-    const operadorId = req.operadorId || req.headers['x-operador-id'];
+    const operadorId =
+      req.operadorId || req.headers['x-operador-id'] || req.body?.operador_id;
     const token = String(req.body?.token || '').trim();
     if (!operadorId) {
       return res.status(400).json({ success: false, message: 'Operador no identificado.' });
@@ -118,15 +119,50 @@ async function registrarPushToken(req, res) {
     if (!token || !token.startsWith('ExponentPushToken')) {
       return res.status(400).json({ success: false, message: 'Token push invalido.' });
     }
+    const rows = await query(
+      `SELECT u.id, r.nombre AS rol FROM Usuarios u
+       INNER JOIN Roles r ON u.rol_id = r.id
+       WHERE u.id = ? AND u.deleted_at IS NULL AND u.activo = 1`,
+      [operadorId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado o inactivo.' });
+    }
     await query(
       `UPDATE Usuarios SET expo_push_token = ?, push_token_at = NOW(), updated_at = NOW() WHERE id = ? AND deleted_at IS NULL`,
       [token, operadorId]
     );
-    return res.json({ success: true });
+    console.log('[push-token] registrado', operadorId, rows[0].rol, token.slice(0, 28) + '...');
+    return res.json({ success: true, registrado: true });
   } catch (error) {
     console.error('Push token error:', error.message);
     return res.status(500).json({ success: false, message: 'Error interno del servidor.' });
   }
 }
 
-module.exports = { login, cambiarPassword, registrarPushToken };
+async function estadoPushToken(req, res) {
+  try {
+    const operadorId =
+      req.operadorId || req.headers['x-operador-id'] || req.query?.operador_id;
+    if (!operadorId) {
+      return res.status(400).json({ success: false, message: 'Operador no identificado.' });
+    }
+    const rows = await query(
+      `SELECT expo_push_token, push_token_at FROM Usuarios WHERE id = ? AND deleted_at IS NULL`,
+      [operadorId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado.' });
+    }
+    const tok = rows[0].expo_push_token;
+    return res.json({
+      success: true,
+      registrado: !!(tok && String(tok).trim()),
+      push_token_at: rows[0].push_token_at,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+module.exports = { login, cambiarPassword, registrarPushToken, estadoPushToken };

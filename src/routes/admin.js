@@ -23,6 +23,7 @@ const {
 const { buildAgendaCobrador, buildCumplimientoBatch, diaCobroDeFecha } = require('../utils/agendaCobrador');
 const { diaCobroHoy } = require('../utils/diasCobro');
 const { validarFilas, importarFilas } = require('../utils/cargaMasivaPrestamos');
+const { runAuditoriaIntegridad } = require('../utils/auditoriaIntegridad');
 const {
   validarFilas: validarFilasGarantias,
   importarFilas: importarFilasGarantias,
@@ -34,7 +35,7 @@ const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos } = require('../utils/reporteVencidos');
 const { aplicarMontoACuotas, revertirMontoDeCuotas, recalcularSaldoPrestamoDesdeCuotas } = require('../utils/registrarPagoNube');
-const { rangoDiaLocal, rangoPeriodoLocal } = require('../utils/fechasSql');
+const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
 
@@ -148,12 +149,12 @@ async function createCliente(req, res) {
       `INSERT INTO Clientes (
         id, primer_nombre, segundo_nombre, primer_apellido, segundo_apellido,
         nombre_completo, cedula, telefono, direccion, actividad_economica,
-        latitud, longitud, cobrador_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        latitud, longitud, latitud_cobro, longitud_cobro, cobrador_id, is_synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [
         id, c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
         c.nombre_completo, c.cedula, c.telefono, c.direccion, c.actividad_economica,
-        c.latitud, c.longitud, c.cobrador_id,
+        c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro, c.cobrador_id,
       ]
     );
     if (c.cobrador_id) {
@@ -867,23 +868,58 @@ async function listPagosDelDia(req, res) {
     let sql = `
       SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
              pg.latitud, pg.longitud, pg.updated_at, pg.editado_por_admin_at,
-             c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono,
-             u.nombre_completo AS cobrador_nombre, p.saldo_pendiente, p.estado AS estado_prestamo,
+             pg.registrado_por_admin, pg.operador_id,
+             c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono, c.cobrador_id AS cliente_cobrador_id,
+             COALESCE(u.nombre_completo, uc.nombre_completo) AS cobrador_nombre,
+             p.saldo_pendiente, p.estado AS estado_prestamo,
              p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro
       FROM Pagos pg
       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
       INNER JOIN Clientes c ON p.cliente_id = c.id
       LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
+      LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id
       WHERE pg.deleted_at IS NULL AND pg.fecha_pago >= ? AND pg.fecha_pago < ?
     `;
     const params = [inicio, fin];
     if (cobrador_id) {
-      sql += ' AND pg.cobrador_id = ?';
-      params.push(cobrador_id);
+      sql += ' AND (pg.cobrador_id = ? OR pg.operador_id = ? OR c.cobrador_id = ?)';
+      params.push(cobrador_id, cobrador_id, cobrador_id);
     }
     sql += ' ORDER BY pg.fecha_pago DESC, c.nombre_completo ASC';
     const rows = await query(sql, params);
-    return res.json({ success: true, data: rows, fecha });
+    return res.json({ success: true, data: rows, fecha, inicio, fin });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+/** Cobros nuevos de cobradores desde timestamp (aviso local admin si no hay push token). */
+async function avisosCobrosCobrador(req, res) {
+  try {
+    const desde = req.query.desde || new Date(Date.now() - 3600000).toISOString();
+    const desdeTs = desdeCorreccionesUnix(desde);
+    const cobros = await query(
+      `SELECT pg.id, pg.prestamo_id, pg.monto_pagado, pg.fecha_pago, pg.cobrador_id,
+              c.nombre_completo AS cliente_nombre,
+              COALESCE(u.nombre_completo, uc.nombre_completo) AS cobrador_nombre
+       FROM Pagos pg
+       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+       INNER JOIN Clientes c ON p.cliente_id = c.id
+       LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
+       LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id
+       WHERE pg.deleted_at IS NULL
+         AND COALESCE(pg.registrado_por_admin, 0) = 0
+         AND UNIX_TIMESTAMP(pg.fecha_pago) > ?
+       ORDER BY pg.fecha_pago DESC
+       LIMIT 30`,
+      [desdeTs]
+    );
+    return res.json({
+      success: true,
+      desde,
+      nuevos: cobros.length,
+      cobros,
+    });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }
@@ -1184,6 +1220,11 @@ async function deletePago(req, res) {
 
     await revertirMontoDeCuotas(conn, pago.prestamo_id, monto);
     const saldoNuevo = await recalcularSaldoPrestamoDesdeCuotas(conn, pago.prestamo_id);
+
+    await conn.execute(
+      `UPDATE Prestamos SET updated_at = NOW(), is_synced = 1 WHERE id = ?`,
+      [pago.prestamo_id]
+    );
 
     await conn.execute(
       `UPDATE Pagos SET deleted_at = NOW(), updated_at = NOW(), is_synced = 1, editado_por_admin_at = NOW()
@@ -1738,6 +1779,15 @@ async function validarCargaMasivaGarantias(req, res) {
   }
 }
 
+async function getAuditoriaIntegridad(req, res) {
+  try {
+    const data = await runAuditoriaIntegridad();
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 async function importarCargaMasivaGarantias(req, res) {
   try {
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
@@ -1962,6 +2012,7 @@ module.exports = {
   crearPrestamo,
   renovacion,
   listPagosDelDia,
+  avisosCobrosCobrador,
   listPagosDetalle,
   getEstadoCuentaCliente,
   updatePago,
@@ -1976,6 +2027,7 @@ module.exports = {
   importarCargaMasiva,
   validarCargaMasivaGarantias,
   importarCargaMasivaGarantias,
+  getAuditoriaIntegridad,
   listGarantiasPrestamo,
   agregarGarantiasPrestamo,
   aplicarProrroga,

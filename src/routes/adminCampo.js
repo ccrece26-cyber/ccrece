@@ -2,6 +2,7 @@ const { query, getConnection } = require('../config/db');
 const { loadAgendaAdminHoy } = require('../utils/rutaDiariaAdmin');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { registrarPagoEnNube, registrarGestionNoPagoEnNube } = require('../utils/registrarPagoNube');
+const { capMontoAlSaldo } = require('../utils/cobroMontos');
 const {
   ensureRutaForOperador,
   agregarClienteARuta,
@@ -159,9 +160,10 @@ async function getResumenCobroCampo(req, res) {
         [prestamoId]
       );
       const cuota = cuotaPend[0];
-      const cuotaDia = cuota
+      const cuotaDiaRaw = cuota
         ? Math.max(0, Number((Number(cuota.monto_programado) - Number(cuota.monto_pagado || 0)).toFixed(2)))
         : 0;
+      const cuotaDia = capMontoAlSaldo(cuotaDiaRaw, prestamo.saldo_pendiente);
       const [pend] = await conn.execute(
         `SELECT COUNT(*) AS n FROM Cuotas_Calendario
          WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,

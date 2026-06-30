@@ -14,11 +14,12 @@ const {
 const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } = require('../utils/fiadoresNube');
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
-const { rangoDiaLocal, whereCierreCalendarioDia } = require('../utils/fechasSql');
+const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
+const { capMontoAlSaldo, voidarCuotasRestantesAlCerrar } = require('../utils/cobroMontos');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
@@ -89,7 +90,9 @@ async function rutaDiaria(req, res) {
       if (prestamoIds.length) {
         const ph3 = prestamoIds.map(() => '?').join(',');
         cuotas = await query(
-          `SELECT * FROM Cuotas_Calendario
+          `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado,
+                  estado, updated_at, deleted_at
+           FROM Cuotas_Calendario
            WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
              AND fecha_programada <= ? AND deleted_at IS NULL
            ORDER BY fecha_programada`,
@@ -177,9 +180,10 @@ async function rutaDiaria(req, res) {
     const pushAgendaItem = (c, p, cuotaPend, extra = {}) => {
       if (!p?.id || prestamosEnAgenda.has(p.id)) return;
       prestamosEnAgenda.add(p.id);
-      const montoDia = cuotaPend
-        ? Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0)
+      const montoDiaRaw = cuotaPend
+        ? Math.max(0, Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0))
         : montoVisitaHoy(p.cuota_semanal_base, p.dias_de_cobro);
+      const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
       agenda.push({
         cuota_id: cuotaPend?.id || `visita-${p.id}`,
         prestamo_id: p.id,
@@ -259,13 +263,40 @@ async function rutaDiaria(req, res) {
       return String(a.prestamo_id).localeCompare(String(b.prestamo_id));
     });
 
+    let pagos_anulados_hoy = [];
+    if (clienteIds.length) {
+      pagos_anulados_hoy = await query(
+        `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.deleted_at, pg.editado_por_admin_at
+         FROM Pagos pg
+         INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+         INNER JOIN Clientes c ON p.cliente_id = c.id
+         WHERE pg.deleted_at IS NOT NULL
+           AND pg.fecha_pago >= ? AND pg.fecha_pago < ?
+           AND (pg.cobrador_id = ? OR c.cobrador_id = ?)`,
+        [diaIni, diaFin, cobradorId, cobradorId]
+      );
+    }
+
     return res.json({
       success: true,
       serverTime: new Date().toISOString(),
       secuencia,
       dia_cobro: hoyDia,
       parametros_financieros: await leerParametrosFinancieros(query),
-      data: { rutas, ruta_clientes, clientes, prestamos, cuotas, fiadores, garantias, prestamo_garantias, agenda, pagos_hoy, gestiones_hoy },
+      data: {
+        rutas,
+        ruta_clientes,
+        clientes,
+        prestamos,
+        cuotas,
+        fiadores,
+        garantias,
+        prestamo_garantias,
+        agenda,
+        pagos_hoy,
+        gestiones_hoy,
+        pagos_anulados_hoy,
+      },
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -760,9 +791,22 @@ async function pushSync(req, res) {
 
     for (const p of pagos) {
       try {
-        const [ex] = await conn.execute('SELECT id FROM Pagos WHERE id = ?', [p.id]);
+        const [ex] = await conn.execute(
+          'SELECT id, deleted_at, prestamo_id FROM Pagos WHERE id = ?',
+          [p.id]
+        );
         if (ex.length) {
-          synced.pagos.push(p.id);
+          if (ex[0].deleted_at) {
+            errores.push({
+              tipo: 'pago',
+              id: p.id,
+              code: 'pago_anulado_en_nube',
+              prestamo_id: ex[0].prestamo_id || p.prestamo_id,
+              message: 'Este cobro fue anulado por el administrador.',
+            });
+          } else {
+            synced.pagos.push(p.id);
+          }
           continue;
         }
 
@@ -864,6 +908,9 @@ async function pushSync(req, res) {
             Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2))
           );
           const estadoPrestamo = nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
+          if (estadoPrestamo === 'Pagado') {
+            await voidarCuotasRestantesAlCerrar(conn, p.prestamo_id);
+          }
           await conn.execute(
             `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
             [nuevoSaldo, estadoPrestamo, p.prestamo_id]
@@ -1116,17 +1163,24 @@ async function pushSync(req, res) {
   }
 }
 
-/** Parche ligero: pagos corregidos por admin + préstamos/cuotas afectados (sin descargar ruta completa). */
+/** Parche ligero: pagos corregidos o registrados por admin + préstamos/cuotas afectados. */
 async function cargarCorreccionesAdmin(cobradorId, desde) {
+  const desdeTs = desdeCorreccionesUnix(desde);
   const pagos = await query(
     `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
             pg.latitud, pg.longitud, pg.registrado_por_admin, pg.operador_id,
             pg.updated_at, pg.editado_por_admin_at, pg.deleted_at
      FROM Pagos pg
-     WHERE pg.cobrador_id = ? AND pg.editado_por_admin_at IS NOT NULL
-       AND pg.editado_por_admin_at > ?
-     ORDER BY pg.editado_por_admin_at ASC`,
-    [cobradorId, desde]
+     INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     WHERE (pg.cobrador_id = ? OR c.cobrador_id = ?)
+       AND (
+         UNIX_TIMESTAMP(COALESCE(pg.editado_por_admin_at, pg.deleted_at)) > ?
+         OR (pg.registrado_por_admin = 1 AND UNIX_TIMESTAMP(pg.updated_at) > ?)
+         OR (pg.deleted_at IS NOT NULL AND UNIX_TIMESTAMP(pg.deleted_at) > ?)
+       )
+     ORDER BY COALESCE(pg.editado_por_admin_at, pg.deleted_at, pg.updated_at) ASC`,
+    [cobradorId, cobradorId, desdeTs, desdeTs, desdeTs]
   );
 
   if (!pagos.length) {
@@ -1159,6 +1213,37 @@ async function cargarCorreccionesAdmin(cobradorId, desde) {
   return { pagos, prestamos, cuotas };
 }
 
+/** IDs de pagos activos/anulados hoy — para reconciliar SQLite del cobrador sin descargar ruta completa. */
+async function cargarSnapshotPagosHoy(cobradorId) {
+  const hoy = hoyISO();
+  const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
+
+  const pagos_hoy = await query(
+    `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
+            pg.registrado_por_admin, pg.operador_id
+     FROM Pagos pg
+     INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     WHERE pg.fecha_pago >= ? AND pg.fecha_pago < ?
+       AND pg.deleted_at IS NULL
+       AND (pg.cobrador_id = ? OR c.cobrador_id = ?)`,
+    [diaIni, diaFin, cobradorId, cobradorId]
+  );
+
+  const pagos_anulados_hoy = await query(
+    `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.deleted_at, pg.editado_por_admin_at
+     FROM Pagos pg
+     INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     WHERE pg.deleted_at IS NOT NULL
+       AND pg.fecha_pago >= ? AND pg.fecha_pago < ?
+       AND (pg.cobrador_id = ? OR c.cobrador_id = ?)`,
+    [diaIni, diaFin, cobradorId, cobradorId]
+  );
+
+  return { pagos_hoy, pagos_anulados_hoy };
+}
+
 async function getCorreccionesAdmin(req, res) {
   try {
     const { cobradorId } = req.params;
@@ -1179,12 +1264,19 @@ async function syncAviso(req, res) {
     const { cobradorId } = req.params;
     const desde = req.query.desde || '1970-01-01T00:00:00.000Z';
     const aplicar = req.query.aplicar === '1' || req.query.aplicar === 'true';
+    const desdeTs = desdeCorreccionesUnix(desde);
 
     const correcciones = await query(
-      `SELECT COUNT(*) AS n FROM Pagos
-       WHERE cobrador_id = ? AND editado_por_admin_at IS NOT NULL
-         AND editado_por_admin_at > ?`,
-      [cobradorId, desde]
+      `SELECT COUNT(*) AS n FROM Pagos pg
+       INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+       INNER JOIN Clientes c ON p.cliente_id = c.id
+       WHERE (pg.cobrador_id = ? OR c.cobrador_id = ?)
+         AND (
+           UNIX_TIMESTAMP(COALESCE(pg.editado_por_admin_at, pg.deleted_at)) > ?
+           OR (pg.registrado_por_admin = 1 AND UNIX_TIMESTAMP(pg.updated_at) > ?)
+           OR (pg.deleted_at IS NOT NULL AND UNIX_TIMESTAMP(pg.deleted_at) > ?)
+         )`,
+      [cobradorId, cobradorId, desdeTs, desdeTs, desdeTs]
     );
 
     const n = Number(correcciones[0]?.n || 0);
@@ -1202,7 +1294,13 @@ async function syncAviso(req, res) {
 
     if (aplicar && n > 0) {
       const payload = await cargarCorreccionesAdmin(cobradorId, desde);
-      return res.json({ ...base, ...payload });
+      const snapshot = await cargarSnapshotPagosHoy(cobradorId);
+      return res.json({ ...base, ...payload, ...snapshot });
+    }
+
+    if (aplicar) {
+      const snapshot = await cargarSnapshotPagosHoy(cobradorId);
+      return res.json({ ...base, ...snapshot });
     }
 
     return res.json(base);
@@ -1499,6 +1597,34 @@ async function registrarCierreCaja(req, res) {
   }
 }
 
+async function historialPrestamosCliente(req, res) {
+  try {
+    const { cobradorId, clienteId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const cli = await query(
+      `SELECT id FROM Clientes WHERE id = ? AND cobrador_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [clienteId, cobradorId]
+    );
+    if (!cli.length) {
+      return res.status(403).json({ success: false, message: 'Cliente no asignado a este cobrador' });
+    }
+    const rows = await query(
+      `SELECT p.id, p.estado, p.monto_desembolsado, p.saldo_pendiente, p.monto_total_pagar,
+              p.fecha_desembolso, p.plazo_semanas, p.renovacion_previa_id, p.numero_recibo_fisico,
+              ur.nombre_completo AS registrado_por, ue.nombre_completo AS entregado_por
+       FROM Prestamos p
+       LEFT JOIN Usuarios ur ON p.cobrador_registro_id = ur.id
+       LEFT JOIN Usuarios ue ON p.cobrador_entrega_id = ue.id
+       WHERE p.cliente_id = ? AND p.deleted_at IS NULL
+       ORDER BY p.fecha_desembolso DESC, p.id DESC`,
+      [clienteId]
+    );
+    return res.json({ success: true, data: rows });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
 module.exports = {
   rutaDiaria,
   pushSync,
@@ -1511,4 +1637,5 @@ module.exports = {
   listPrestamosCobrador,
   aplicarProrrogaCobrador,
   pagosPorFecha,
+  historialPrestamosCliente,
 };

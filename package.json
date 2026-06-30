@@ -14,6 +14,10 @@
     "repair-fiadores": "node src/scripts/repair-fiadores.js",
     "fix-cedulas": "node src/scripts/fix-cedulas.js",
     "ensure-indexes": "node -e \"require('./src/utils/ensureIndexes').ensurePerformanceIndexes().then(n=>console.log('indexes',n)).catch(e=>{console.error(e);process.exit(1)})\"",
+    "export-respaldo": "node src/scripts/export-respaldo.js",
+    "restaurar-respaldo": "node src/scripts/restaurar-respaldo.js",
+    "verificar-migracion": "node src/scripts/verificar-migracion.js",
+    "renombrar-schema": "node src/scripts/renombrar-schema.js",
     "seed-demo": "node src/scripts/seed-demo-esteli.js",
     "vistas-reporte": "node src/scripts/create-views.js"
   },

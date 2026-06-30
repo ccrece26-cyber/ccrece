@@ -27,6 +27,8 @@ const COLUMNAS = [
   'dias_cobro',
   'fecha_desembolso',
   'saldo_pendiente',
+  'monto_pagado_historico',
+  'fecha_ultimo_abono',
   'semanas_pagadas',
   'latitud',
   'longitud',
@@ -44,8 +46,10 @@ const INSTRUCCIONES = [
   { campo: 'tasa_mensual', nota: '10 = 10% por mes.' },
   { campo: 'dias_cobro', nota: 'LUNES,MIERCOLES,VIERNES o L,M,V' },
   { campo: 'fecha_desembolso', nota: 'YYYY-MM-DD (ej. 2025-11-15)' },
-  { campo: 'saldo_pendiente', nota: 'Lo que debe hoy (ej. 4200)' },
-  { campo: 'semanas_pagadas', nota: 'Semanas ya cobradas (ej. 4). Borre filas de ejemplo antes de importar.' },
+  { campo: 'saldo_pendiente', nota: 'Lo que debe hoy (ej. 4200). Fuente principal.' },
+  { campo: 'monto_pagado_historico', nota: 'Opcional. Abonado antes de la app (= total − saldo).' },
+  { campo: 'fecha_ultimo_abono', nota: 'Opcional. Fecha del pago histórico (YYYY-MM-DD).' },
+  { campo: 'semanas_pagadas', nota: 'Solo referencia. Borre filas de ejemplo antes de importar.' },
 ];
 
 const FILAS_EJEMPLO = [

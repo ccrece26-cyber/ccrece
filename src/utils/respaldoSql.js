@@ -25,8 +25,20 @@ const ORDEN_TABLAS = [
 /** Filas por sentencia INSERT (solo tablas grandes). */
 const INSERT_CHUNK = 400;
 
-function escapeSqlValue(val) {
+function escapeSqlValue(val, colName) {
   if (val === null || val === undefined) return 'NULL';
+  if (colName === 'dias_de_cobro' || colName === 'dias_cobro') {
+    let jsonStr;
+    if (typeof val === 'object' && val !== null) jsonStr = JSON.stringify(val);
+    else {
+      const s = String(val).trim();
+      if (!s) return 'NULL';
+      if (s.startsWith('[')) jsonStr = s;
+      else if (s.includes(',')) jsonStr = JSON.stringify(s.split(',').map((d) => d.trim()));
+      else jsonStr = JSON.stringify([s]);
+    }
+    return `'${jsonStr.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+  }
   if (val instanceof Date) {
     const iso = val.toISOString().slice(0, 19).replace('T', ' ');
     return `'${iso}'`;
@@ -112,7 +124,7 @@ function sqlInserts(tabla, rows) {
   for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
     const slice = rows.slice(i, i + INSERT_CHUNK);
     const values = slice.map((row) => {
-      const vals = cols.map((c) => escapeSqlValue(row[c]));
+      const vals = cols.map((c) => escapeSqlValue(row[c], c));
       return `(${vals.join(', ')})`;
     });
     chunks.push(`INSERT INTO \`${safe}\` (${colList}) VALUES\n${values.join(',\n')};\n`);

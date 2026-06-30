@@ -18,4 +18,17 @@ function whereCierreCalendarioDia(columna = 'fecha_cierre') {
   return `DATE(${columna}) = DATE(?)`;
 }
 
-module.exports = { rangoDiaLocal, rangoPeriodoLocal, hoyRango, hoyISO, whereCierreCalendarioDia };
+/** Convierte ISO local del cobrador a unix seg para comparar con DATETIME en TiDB. */
+function desdeCorreccionesUnix(desde) {
+  const ms = new Date(desde || 0).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
+}
+
+module.exports = {
+  rangoDiaLocal,
+  rangoPeriodoLocal,
+  hoyRango,
+  hoyISO,
+  whereCierreCalendarioDia,
+  desdeCorreccionesUnix,
+};

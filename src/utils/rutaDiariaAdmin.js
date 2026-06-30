@@ -10,6 +10,7 @@ const {
   fechaCalendarioISO,
 } = require('./diasCobro');
 const { rangoDiaLocal } = require('../utils/fechasSql');
+const { capMontoAlSaldo } = require('./cobroMontos');
 
 /**
  * Ruta del día para administrador.
@@ -199,9 +200,10 @@ async function loadAgendaAdminHoy(opciones = {}) {
     const pushAgendaItem = (c, p, cuotaPend, extra = {}) => {
       if (!p?.id || prestamosEnAgenda.has(p.id)) return;
       prestamosEnAgenda.add(p.id);
-      const montoDia = cuotaPend
-        ? Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0)
+      const montoDiaRaw = cuotaPend
+        ? Math.max(0, Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0))
         : montoVisitaHoy(p.cuota_semanal_base, p.dias_de_cobro);
+      const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
       const ev =
         extra.estado_visita ??
         (pagoPorPrestamo.has(p.id)

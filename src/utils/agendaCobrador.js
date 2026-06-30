@@ -8,6 +8,8 @@ const {
 const { rangoDiaLocal } = require('./fechasSql');
 const { analizarVisitaGps, resumenGpsAgenda, refCoordsCliente } = require('./gpsCumplimiento');
 const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
+const { anotarTiemposVisitas, resumenTiemposRuta } = require('./tiemposVisita');
+const { capMontoAlSaldo } = require('./cobroMontos');
 
 const MAPA = ['DOMINGO', 'LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'];
 
@@ -57,9 +59,11 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
     if (!p?.id || prestamosEnAgenda.has(p.id)) return;
     prestamosEnAgenda.add(p.id);
     const pg = pagoPorPrestamo.get(p.id);
-    const montoDia = cuotaPend
-      ? Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0)
+    const gest = gestionPorPrestamo.get(p.id);
+    const montoDiaRaw = cuotaPend
+      ? Math.max(0, Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0))
       : montoVisitaHoy(p.cuota_semanal_base, p.dias_de_cobro);
+    const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
 
     const esLiquidacion =
       extra.tipo_visita === 'liquidado' ||
@@ -104,8 +108,9 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
       estado_visita,
       registrado_por_admin: pg ? Number(pg.registrado_por_admin) === 1 : false,
       pago_hoy_id: extra.pago_hoy_id ?? pg?.id ?? null,
-      motivo_no_pago: gestionPorPrestamo.get(p.id)?.motivo ?? null,
+      motivo_no_pago: gest?.motivo ?? null,
       etiqueta_visita,
+      fecha_evento: pg?.fecha_pago || gest?.fecha_gestion || null,
       latitud: c.latitud,
       longitud: c.longitud,
       latitud_cobro: c.latitud_cobro,
@@ -114,7 +119,7 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
       ref_lng: ref?.lng ?? null,
       ...analizarVisitaGps(c, {
         pago: pg,
-        gestion: gestionPorPrestamo.get(p.id),
+        gestion: gest,
         estadoVisita: estado_visita,
         tipoVisita: tipo_visita,
       }),
@@ -153,16 +158,19 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
     return String(a.prestamo_id).localeCompare(String(b.prestamo_id));
   });
 
-  const cobrado = agenda.filter((v) => esVisitaCobrada(v.estado_visita)).length;
-  const liquidado = agenda.filter((v) => v.tipo_visita === 'liquidado').length;
-  const no_pago = agenda.filter((v) => v.estado_visita === 'no_pago').length;
-  const pendiente = agenda.filter((v) => v.estado_visita === 'pendiente').length;
-  const total = agenda.length;
+  const agendaConTiempos = anotarTiemposVisitas(agenda);
+  const tiempos = resumenTiemposRuta(agendaConTiempos);
+
+  const cobrado = agendaConTiempos.filter((v) => esVisitaCobrada(v.estado_visita)).length;
+  const liquidado = agendaConTiempos.filter((v) => v.tipo_visita === 'liquidado').length;
+  const no_pago = agendaConTiempos.filter((v) => v.estado_visita === 'no_pago').length;
+  const pendiente = agendaConTiempos.filter((v) => v.estado_visita === 'pendiente').length;
+  const total = agendaConTiempos.length;
   const visitadas = cobrado + no_pago;
   const monto_cobrado = pagosRuta.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
 
   return {
-    agenda,
+    agenda: agendaConTiempos,
     resumen: {
       total_visitas: total,
       cobrado,
@@ -172,7 +180,8 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
       visitadas,
       porcentaje: total ? Math.round((visitadas / total) * 100) : 0,
       monto_cobrado,
-      gps: resumenGpsAgenda(agenda),
+      gps: resumenGpsAgenda(agendaConTiempos),
+      tiempos,
     },
     pagos_hoy: pagosRuta,
     gestiones_hoy: gestionesRuta,
@@ -216,7 +225,9 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
     if (prestamoIds.length) {
       const ph3 = prestamoIds.map(() => '?').join(',');
       cuotas = await query(
-        `SELECT * FROM Cuotas_Calendario
+        `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado,
+                estado, updated_at, deleted_at
+         FROM Cuotas_Calendario
          WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
            AND fecha_programada <= ? AND deleted_at IS NULL
          ORDER BY fecha_programada`,

@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
-const { login, cambiarPassword, registrarPushToken } = require('./routes/auth');
+const { login, cambiarPassword, registrarPushToken, estadoPushToken } = require('./routes/auth');
 const { syncMasivo } = require('./routes/pagos');
 const { pullChanges, pushGestiones, healthCheck } = require('./routes/sync');
 const admin = require('./routes/admin');
@@ -37,6 +37,7 @@ app.get('/api/licencia/estado', licencia.estadoLicencia);
 app.use('/api', guardEscrituraActiva);
 
 app.post('/api/auth/push-token', registrarPushToken);
+app.get('/api/auth/push-token/estado', estadoPushToken);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
 app.post('/api/admin/cierre-caja/reabrir', admin.reabrirCierreCajaDia);
@@ -71,6 +72,7 @@ app.put('/api/admin/prestamos/:id/recibo-fisico', admin.patchReciboFisicoPrestam
 app.post('/api/admin/prestamos', admin.crearPrestamo);
 app.post('/api/admin/renovaciones', admin.renovacion);
 app.get('/api/admin/pagos', admin.listPagosDelDia);
+app.get('/api/admin/avisos-cobros', admin.avisosCobrosCobrador);
 app.get('/api/admin/pagos/detalle', admin.listPagosDetalle);
 app.get('/api/admin/clientes/:id/estado-cuenta', admin.getEstadoCuentaCliente);
 app.put('/api/admin/pagos/:id', admin.updatePago);
@@ -85,6 +87,7 @@ app.post('/api/admin/carga-masiva/validar', admin.validarCargaMasiva);
 app.post('/api/admin/carga-masiva/importar', admin.importarCargaMasiva);
 app.post('/api/admin/carga-masiva-garantias/validar', admin.validarCargaMasivaGarantias);
 app.post('/api/admin/carga-masiva-garantias/importar', admin.importarCargaMasivaGarantias);
+app.get('/api/admin/auditoria-integridad', admin.getAuditoriaIntegridad);
 app.get('/api/admin/prestamos/:id/garantias', admin.listGarantiasPrestamo);
 app.post('/api/admin/prestamos/:id/garantias', admin.agregarGarantiasPrestamo);
 app.put('/api/admin/rutas/:rutaId/cobrador', admin.asignarCobrador);
@@ -101,6 +104,7 @@ app.post('/api/admin/campo/gestion-no-pago', adminCampo.postGestionNoPagoCampo);
 
 app.get('/api/cobrador/pagos/:cobradorId', cobrador.pagosPorFecha);
 app.get('/api/cobrador/prestamos/:cobradorId', cobrador.listPrestamosCobrador);
+app.get('/api/cobrador/clientes/:clienteId/prestamos/:cobradorId', cobrador.historialPrestamosCliente);
 app.post('/api/cobrador/prorrogas/:cobradorId', cobrador.aplicarProrrogaCobrador);
 app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
 app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);

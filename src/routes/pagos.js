@@ -1,6 +1,7 @@
 const { getConnection } = require('../config/db');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
+const { voidarCuotasRestantesAlCerrar } = require('../utils/cobroMontos');
 const { rangoDiaLocal } = require('../utils/fechasSql');
 
 /**
@@ -65,9 +66,13 @@ async function syncMasivo(req, res) {
 
       await aplicarMontoACuotas(conn, pago.prestamo_id, monto);
       const nuevoSaldo = Math.max(0, Number((Number(prestamo.saldo_pendiente) - monto).toFixed(2)));
+      const estadoPrestamo = nuevoSaldo <= 0.01 ? 'Pagado' : 'Activo';
+      if (estadoPrestamo === 'Pagado') {
+        await voidarCuotasRestantesAlCerrar(conn, pago.prestamo_id);
+      }
       await conn.execute(
-        `UPDATE Prestamos SET saldo_pendiente = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-        [nuevoSaldo, pago.prestamo_id]
+        `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
+        [nuevoSaldo, estadoPrestamo, pago.prestamo_id]
       );
 
       procesados += 1;

@@ -3,6 +3,8 @@ const { nombreCompleto } = require('./cliente');
 const { normalizarCedula, validarCedula } = require('./cedulaNic');
 const { reserveClienteIds, initSecuenciaCliente } = require('./clienteId');
 const { insertMany } = require('./bulkSql');
+const { aplicarMontoACuotas } = require('./registrarPagoNube');
+const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
 const {
   parseTasaMensualInput,
   calcularCuotaYDistribucion,
@@ -166,6 +168,10 @@ function normalizarFila(raw, indice) {
   const dias = parseDiasCobro(src.dias_cobro ?? src.dias_de_cobro ?? src.dias);
   const fecha_desembolso = parseFechaISO(src.fecha_desembolso ?? src.fecha_inicio);
   let saldo_pendiente = num(src.saldo_pendiente ?? src.saldo);
+  const monto_pagado_historico = num(src.monto_pagado_historico ?? src.monto_pagado ?? src.abonado_historico);
+  const fecha_ultimo_abono = parseFechaISO(
+    src.fecha_ultimo_abono ?? src.fecha_ultimo_pago ?? src.ultimo_abono
+  );
   const semanas_pagadas = Math.max(0, Math.floor(num(src.semanas_pagadas ?? src.semanas_pagada) || 0));
 
   return {
@@ -189,6 +195,8 @@ function normalizarFila(raw, indice) {
     dias_de_cobro: dias,
     fecha_desembolso,
     saldo_pendiente,
+    monto_pagado_historico,
+    fecha_ultimo_abono,
     semanas_pagadas,
     orden_visita: num(src.orden_visita ?? src.orden_ruta),
   };
@@ -246,57 +254,157 @@ function resolverImportacionFinanciera(fila) {
     fila.dias_de_cobro,
     fin.cuotaPorDiaDeCobro
   );
+  const total = fin.montoTotalPagar;
   const cuotasPorSemana = fila.dias_de_cobro.length || 1;
 
-  let cuotasAPagar;
   let saldo;
-
-  if (fila.semanas_pagadas > 0) {
-    cuotasAPagar = Math.min(agenda.length, Math.max(0, fila.semanas_pagadas) * cuotasPorSemana);
-    const montoPagadoVirtual = Number((cuotasAPagar * fin.cuotaPorDiaDeCobro).toFixed(2));
-    saldo = Math.max(0, Number((fin.montoTotalPagar - montoPagadoVirtual).toFixed(2)));
-  } else if (fila.saldo_pendiente != null && fila.saldo_pendiente >= 0) {
-    saldo = Number(Math.min(Math.max(0, fila.saldo_pendiente), fin.montoTotalPagar).toFixed(2));
-    const pagadoEst = Number((fin.montoTotalPagar - saldo).toFixed(2));
-    cuotasAPagar = Math.min(
-      agenda.length,
-      Math.max(0, Math.round(pagadoEst / fin.cuotaPorDiaDeCobro))
-    );
+  if (fila.saldo_pendiente != null && fila.saldo_pendiente >= 0) {
+    saldo = Number(Math.min(Math.max(0, fila.saldo_pendiente), total).toFixed(2));
+  } else if (fila.semanas_pagadas > 0) {
+    const cuotasVirtuales = Math.min(agenda.length, fila.semanas_pagadas * cuotasPorSemana);
+    const pagadoEst = Number((cuotasVirtuales * fin.cuotaPorDiaDeCobro).toFixed(2));
+    saldo = Math.max(0, Number((total - pagadoEst).toFixed(2)));
   } else {
-    saldo = fin.montoTotalPagar;
-    cuotasAPagar = 0;
+    saldo = total;
   }
 
-  return { fin, agenda, cuotasAPagar, saldo_pendiente: saldo };
+  let monto_pagado_historico;
+  if (fila.monto_pagado_historico != null && fila.monto_pagado_historico >= 0) {
+    monto_pagado_historico = Number(Math.min(fila.monto_pagado_historico, total).toFixed(2));
+    saldo = Math.max(0, Number((total - monto_pagado_historico).toFixed(2)));
+  } else {
+    monto_pagado_historico = Math.max(0, Number((total - saldo).toFixed(2)));
+  }
+
+  const fecha_ultimo_abono = fila.fecha_ultimo_abono || fila.fecha_desembolso;
+
+  return {
+    fin,
+    agenda,
+    saldo_pendiente: saldo,
+    monto_pagado_historico,
+    fecha_ultimo_abono,
+  };
 }
 
 function calcularPreview(fila) {
-  const { fin, agenda, cuotasAPagar, saldo_pendiente: saldo } = resolverImportacionFinanciera(fila);
+  const resolved = resolverImportacionFinanciera(fila);
+  const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico } = resolved;
 
   if (saldo > fin.montoTotalPagar + 0.02) {
     return { error: `saldo_pendiente (${saldo}) mayor que total a pagar (${fin.montoTotalPagar})` };
   }
+  if (monto_pagado_historico > fin.montoTotalPagar + 0.02) {
+    return {
+      error: `monto_pagado_historico (${monto_pagado_historico}) supera total a pagar (${fin.montoTotalPagar})`,
+    };
+  }
+  const diffCuadre = Math.abs(fin.montoTotalPagar - saldo - monto_pagado_historico);
+  if (diffCuadre > 0.02) {
+    return {
+      error: `No cuadra: saldo (${saldo}) + pagado histórico (${monto_pagado_historico}) ≠ total (${fin.montoTotalPagar})`,
+    };
+  }
   if (
     fila.semanas_pagadas > 0 &&
     fila.saldo_pendiente != null &&
-    fila.saldo_pendiente > 0
+    fila.saldo_pendiente >= 0
   ) {
-    const diff = Math.abs(saldo - fila.saldo_pendiente);
+    const cuotasVirtuales = Math.min(agenda.length, fila.semanas_pagadas * (fila.dias_de_cobro.length || 1));
+    const saldoPorSemanas = Math.max(
+      0,
+      Number((fin.montoTotalPagar - cuotasVirtuales * fin.cuotaPorDiaDeCobro).toFixed(2))
+    );
+    const diff = Math.abs(saldo - saldoPorSemanas);
     if (diff > fin.cuotaPorDiaDeCobro * 1.5 && diff > fin.montoTotalPagar * 0.08) {
       return {
-        error: `saldo_pendiente (${fila.saldo_pendiente}) no cuadra con semanas_pagadas (${fila.semanas_pagadas}); use semanas_pagadas o corrija saldo (esperado ~${saldo})`,
+        error: `saldo_pendiente (${fila.saldo_pendiente}) no cuadra con semanas_pagadas (${fila.semanas_pagadas}); esperado ~${saldoPorSemanas}`,
       };
     }
   }
-  if (cuotasAPagar >= agenda.length && saldo > 0.02) {
-    return { error: 'semanas_pagadas cubren el plazo pero saldo_pendiente sigue > 0' };
+  if (saldo <= 0.01 && monto_pagado_historico + 0.02 < fin.montoTotalPagar) {
+    return { error: 'Saldo 0 pero el monto pagado histórico no cubre el total del crédito' };
   }
   return {
     ...fin,
     saldo_pendiente: saldo,
+    monto_pagado_historico,
+    fecha_ultimo_abono: resolved.fecha_ultimo_abono,
     cuotas_agenda: agenda.length,
-    cuotas_marcar_pagadas: cuotasAPagar,
+    creara_pago_historico: monto_pagado_historico > 0.01,
   };
+}
+
+async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 0.02) {
+  const [rows] = await conn.execute(
+    `SELECT monto_total_pagar, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [prestamoId]
+  );
+  if (!rows.length) throw new Error('Prestamo no encontrado tras importar');
+  const total = Number(rows[0].monto_total_pagar);
+  const saldo = Number(rows[0].saldo_pendiente);
+  const [pagosRow] = await conn.execute(
+    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Pagos
+     WHERE prestamo_id = ? AND deleted_at IS NULL`,
+    [prestamoId]
+  );
+  const [cuotasRow] = await conn.execute(
+    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Cuotas_Calendario
+     WHERE prestamo_id = ? AND deleted_at IS NULL`,
+    [prestamoId]
+  );
+  const sumPagos = Number(pagosRow[0]?.t || 0);
+  const sumCuotas = Number(cuotasRow[0]?.t || 0);
+  const saldoEsperado = Math.max(0, Number((total - sumPagos).toFixed(2)));
+
+  if (Math.abs(saldo - saldoEsperado) > tolerancia) {
+    throw new Error(
+      `Descuadre saldo vs pagos: saldo C$ ${saldo.toFixed(2)}, esperado C$ ${saldoEsperado.toFixed(2)}`
+    );
+  }
+  if (Math.abs(sumPagos - sumCuotas) > tolerancia) {
+    throw new Error(
+      `Descuadre pagos vs cuotas: pagos C$ ${sumPagos.toFixed(2)}, cuotas C$ ${sumCuotas.toFixed(2)}`
+    );
+  }
+}
+
+async function aplicarPagoHistoricoImportacion(conn, item) {
+  const { prestamo_id: prestamoId, cobrador_id: cobradorId, monto_pagado_historico: monto, fecha_ultimo_abono: fecha } =
+    item;
+  if (!monto || monto <= 0.01) return;
+
+  const fechaPago = fecha ? `${fecha}T12:00:00.000Z` : new Date().toISOString();
+  const pagoId = uuidv4();
+  await conn.execute(
+    `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
+      registrado_por_admin, operador_id, is_synced)
+     VALUES (?, ?, ?, ?, ?, 0, 0, 1, ?, 1)`,
+    [pagoId, prestamoId, cobradorId, monto, fechaPago, cobradorId]
+  );
+  await aplicarMontoACuotas(conn, prestamoId, monto, fecha);
+
+  const [pagosRow] = await conn.execute(
+    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Pagos
+     WHERE prestamo_id = ? AND deleted_at IS NULL`,
+    [prestamoId]
+  );
+  const [prestRows] = await conn.execute(
+    `SELECT monto_total_pagar FROM Prestamos WHERE id = ? LIMIT 1`,
+    [prestamoId]
+  );
+  const total = Number(prestRows[0]?.monto_total_pagar || 0);
+  const sumPagos = Number(pagosRow[0]?.t || 0);
+  const nuevoSaldo = Math.max(0, Number((total - sumPagos).toFixed(2)));
+  const estado = nuevoSaldo <= 0.01 ? 'Pagado' : 'Activo';
+  if (estado === 'Pagado') {
+    await voidarCuotasRestantesAlCerrar(conn, prestamoId);
+  }
+  await conn.execute(
+    `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
+    [estado === 'Pagado' ? 0 : nuevoSaldo, estado, prestamoId]
+  );
+  await verificarCuadrePrestamo(conn, prestamoId);
 }
 
 async function validarFilas(filasRaw, queryFn) {
@@ -355,11 +463,12 @@ async function validarFilas(filasRaw, queryFn) {
       monto_desembolsado: fila.monto_desembolsado,
       plazo_semanas: fila.plazo_semanas,
       saldo_pendiente: preview.saldo_pendiente,
+      monto_pagado_historico: preview.monto_pagado_historico,
       cuota_semanal: preview.cuotaSemanalBase,
       monto_total: preview.montoTotalPagar,
       dias_de_cobro: fila.dias_de_cobro.join(','),
       fecha_desembolso: fila.fecha_desembolso,
-      cuotas_pagadas: preview.cuotas_marcar_pagadas,
+      cuotas_pagadas: preview.creara_pago_historico ? 'vía Pago histórico' : 0,
       _datos: { ...fila, cobrador_id: cobrador.id },
     });
   }
@@ -437,7 +546,7 @@ async function insertarCuotasBulk(conn, cuotasRows) {
 }
 
 async function importarUnaFila(conn, fila, ctx) {
-  const { fin, agenda, cuotasAPagar: pagarHasta, saldo_pendiente: saldo } =
+  const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico, fecha_ultimo_abono } =
     resolverImportacionFinanciera(fila);
 
   let clienteId = ctx.cedulaMap.get(fila.cedula);
@@ -531,19 +640,14 @@ async function importarUnaFila(conn, fila, ctx) {
   const agendaCuotas = agenda;
   for (let i = 0; i < agendaCuotas.length; i += 1) {
     const c = agendaCuotas[i];
-    const pagada = i < pagarHasta;
     ctx.cuotasBuffer.push({
       id: uuidv4(),
       prestamo_id: prestamoId,
       fecha_programada: c.fecha_programada,
       monto_programado: c.monto_programado,
-      monto_pagado: pagada ? c.monto_programado : 0,
-      estado: pagada ? 'Pagada' : 'Programada',
+      monto_pagado: 0,
+      estado: 'Programada',
     });
-  }
-
-  if (saldo <= 0.01) {
-    await conn.execute(`UPDATE Prestamos SET estado = 'Pagado', saldo_pendiente = 0 WHERE id = ?`, [prestamoId]);
   }
 
   const rutaId = ctx.rutaCache.get(fila.cobrador_id);
@@ -572,6 +676,9 @@ async function importarUnaFila(conn, fila, ctx) {
     prestamo_id: prestamoId,
     cliente_nuevo: clienteNuevo,
     ruta_id: rutaId,
+    cobrador_id: fila.cobrador_id,
+    monto_pagado_historico,
+    fecha_ultimo_abono,
   };
 }
 
@@ -619,6 +726,7 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
 
   const exitos = [];
   const fallos = [...erroresPrev];
+  const pendientesPago = [];
   const rutasOptimizar = new Set();
   const conn = await getConnection();
   const cuotasBuffer = [];
@@ -646,6 +754,7 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
         const r = await importarUnaFila(conn, fila, ctx);
         newIdIdx = ctx.newIdIdx;
         exitos.push({ fila: fila._fila, cedula: fila.cedula, ...r });
+        pendientesPago.push(r);
         rutasOptimizar.add(r.ruta_id);
       } catch (e) {
         fallos.push({ fila: fila._fila, cedula: fila.cedula, error: e.message });
@@ -653,6 +762,19 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
     }
 
     await insertarCuotasBulk(conn, cuotasBuffer);
+
+    for (const item of pendientesPago) {
+      try {
+        if (item.monto_pagado_historico > 0.01) {
+          await aplicarPagoHistoricoImportacion(conn, item);
+        } else {
+          await verificarCuadrePrestamo(conn, item.prestamo_id);
+        }
+      } catch (e) {
+        throw new Error(`Cédula ${item.cedula || '?'}: ${e.message}`);
+      }
+    }
+
     await conn.commit();
   } catch (e) {
     await conn.rollback();
@@ -710,6 +832,8 @@ module.exports = {
     'dias_cobro',
     'fecha_desembolso',
     'saldo_pendiente',
+    'monto_pagado_historico',
+    'fecha_ultimo_abono',
     'semanas_pagadas',
     'latitud',
     'longitud',

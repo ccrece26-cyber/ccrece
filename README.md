@@ -1,4 +1,4 @@
-# apiCrediCrece
+# ccrece
 
 API REST para **Credi Crece** (microfinanzas Nicaragua). Conecta la app móvil Expo con **TiDB Cloud** (MySQL).
 

@@ -4,6 +4,11 @@ const { normalizarCedula, validarCedula } = require('./cedulaNic');
 const { reserveClienteIds, initSecuenciaCliente } = require('./clienteId');
 const { insertMany, updateManyById } = require('./bulkSql');
 const { aplicarMontoACuotas } = require('./registrarPagoNube');
+const {
+  normalizarAbonoCuota,
+  absorberResiduosCuotasEnMemoria,
+  absorberResiduosCuotas,
+} = require('./cuotasCalendario');
 const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
 const {
   parseTasaMensualInput,
@@ -347,12 +352,12 @@ function aplicarMontoACuotasInMemoria(cuotas, monto) {
     );
     if (pendiente <= 0) continue;
     const abono = Math.min(restante, pendiente);
-    const nuevoPagado = Number((Number(cuota.monto_pagado || 0) + abono).toFixed(2));
+    const { monto_pagado: nuevoPagado, estado } = normalizarAbonoCuota(cuota, abono);
     cuota.monto_pagado = nuevoPagado;
-    cuota.estado =
-      nuevoPagado >= Number(cuota.monto_programado) - 0.01 ? 'Pagada' : 'Parcial';
+    cuota.estado = estado;
     restante = Number((restante - abono).toFixed(2));
   }
+  absorberResiduosCuotasEnMemoria(cuotas);
 }
 
 function reconciliarCuotasConPagosInMemoria(cuotasRows, sumPagos, toleranciaMax = 120) {
@@ -381,6 +386,7 @@ function reconciliarCuotasConPagosInMemoria(cuotasRows, sumPagos, toleranciaMax 
     cuota.estado = capped >= prog - 0.01 ? 'Pagada' : capped > 0.009 ? 'Parcial' : 'Programada';
     diff = Number((diff - aplicado).toFixed(2));
   }
+  absorberResiduosCuotasEnMemoria(cuotasRows);
 }
 
 async function reconciliarCuotasConPagos(conn, prestamoId, toleranciaMax = 120) {
@@ -427,6 +433,7 @@ async function reconciliarCuotasConPagos(conn, prestamoId, toleranciaMax = 120) 
     );
     diff = Number((diff - aplicado).toFixed(2));
   }
+  await absorberResiduosCuotas(conn, prestamoId);
 }
 
 async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 1.5) {

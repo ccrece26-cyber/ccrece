@@ -10,6 +10,10 @@ const { analizarVisitaGps, resumenGpsAgenda, refCoordsCliente } = require('./gps
 const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
 const { anotarTiemposVisitas, resumenTiemposRuta } = require('./tiemposVisita');
 const { capMontoAlSaldo } = require('./cobroMontos');
+const {
+  seleccionarCuotaAgenda,
+  montoCobroDelDia,
+} = require('./cuotasCalendario');
 
 const MAPA = ['DOMINGO', 'LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'];
 
@@ -60,9 +64,7 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
     prestamosEnAgenda.add(p.id);
     const pg = pagoPorPrestamo.get(p.id);
     const gest = gestionPorPrestamo.get(p.id);
-    const montoDiaRaw = cuotaPend
-      ? Math.max(0, Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0))
-      : montoVisitaHoy(p.cuota_semanal_base, p.dias_de_cobro);
+    const montoDiaRaw = montoCobroDelDia(cuotaPend, p, montoVisitaHoy);
     const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
 
     const esLiquidacion =
@@ -129,8 +131,13 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
   for (const c of clientes) {
     const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
     if (p && debeSugerirCobroEnFecha(hoy, p)) {
-      const cuotaPend = cuotas.find(
-        (cc) => cc.prestamo_id === p.id && !esCuotaDiaDesembolso(cc, p)
+      const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+      const cuotaPend = seleccionarCuotaAgenda(
+        cuotasPrestamo,
+        p,
+        hoy,
+        esCuotaDiaDesembolso,
+        montoVisitaHoy
       );
       pushAgendaItem(c, p, cuotaPend);
     }

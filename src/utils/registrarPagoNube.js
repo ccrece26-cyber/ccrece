@@ -3,6 +3,7 @@ const { calcularLiquidacionAnticipada } = require('./finanzasNube');
 const { exigirUsuarioActivo } = require('./assertUsuarioActivo');
 const { rangoDiaLocal } = require('./fechasSql');
 const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
+const { normalizarAbonoCuota, absorberResiduosCuotas } = require('./cuotasCalendario');
 
 async function resolverCobradorAsignado(conn, prestamoId) {
   const [rows] = await conn.execute(
@@ -32,8 +33,7 @@ async function aplicarMontoACuotas(conn, prestamoId, monto, fechaISO) {
     );
     if (pendiente <= 0) continue;
     const abono = Math.min(restante, pendiente);
-    const nuevoPagado = Number((Number(cuota.monto_pagado || 0) + abono).toFixed(2));
-    const estado = nuevoPagado >= Number(cuota.monto_programado) - 0.01 ? 'Pagada' : 'Parcial';
+    const { monto_pagado: nuevoPagado, estado } = normalizarAbonoCuota(cuota, abono);
     await conn.execute(
       `UPDATE Cuotas_Calendario SET monto_pagado = ?, estado = ?, updated_at = NOW(), is_synced = 1
        WHERE id = ?`,
@@ -41,6 +41,7 @@ async function aplicarMontoACuotas(conn, prestamoId, monto, fechaISO) {
     );
     restante = Number((restante - abono).toFixed(2));
   }
+  await absorberResiduosCuotas(conn, prestamoId);
 }
 
 /** Revierte abono de cuotas (de la más reciente hacia atrás) al corregir un pago hacia abajo. */

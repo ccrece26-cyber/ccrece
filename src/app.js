@@ -108,6 +108,7 @@ app.get('/api/cobrador/clientes/:clienteId/prestamos/:cobradorId', cobrador.hist
 app.post('/api/cobrador/prorrogas/:cobradorId', cobrador.aplicarProrrogaCobrador);
 app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
 app.get('/api/cobrador/clientes-gps/:cobradorId', cobrador.clientesGps);
+app.get('/api/cobrador/cartera-version/:cobradorId', cobrador.carteraVersion);
 app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);
 app.get('/api/cobrador/cierre-caja/:cobradorId/resumen', cobrador.resumenCierreCaja);
 app.post('/api/cobrador/cierre-caja/:cobradorId', cobrador.registrarCierreCaja);

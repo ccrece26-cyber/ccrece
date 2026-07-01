@@ -1619,6 +1619,24 @@ async function clientesGps(req, res) {
   }
 }
 
+/** Versión de cartera demo — la app redescarga ruta si cambió (nombres/cuotas/saldos). */
+async function carteraVersion(req, res) {
+  try {
+    const { cobradorId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const rows = await query(
+      `SELECT valor FROM Parametros_Globales WHERE clave = 'CARTERA_DEMO_VERSION' LIMIT 1`
+    );
+    return res.json({
+      success: true,
+      version: rows[0]?.valor || '0',
+      serverTime: new Date().toISOString(),
+    });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
 async function historialPrestamosCliente(req, res) {
   try {
     const { cobradorId, clienteId } = req.params;
@@ -1650,6 +1668,7 @@ async function historialPrestamosCliente(req, res) {
 module.exports = {
   rutaDiaria,
   clientesGps,
+  carteraVersion,
   pushSync,
   syncAviso,
   getCorreccionesAdmin,

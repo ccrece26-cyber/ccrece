@@ -5,9 +5,10 @@
  * Uso: node src/scripts/generar-carga-200-demo.js
  * Salida: backend/output/carga_masiva_200.csv
  */
-require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '../../.env.nuevo') });
 const fs = require('fs');
 const path = require('path');
+const XLSX = require('xlsx');
 const { query, pool } = require('../config/db');
 const { hoyISO } = require('../utils/zonaHoraria');
 const {
@@ -87,29 +88,44 @@ const NOMBRES_POOL = (() => {
   const PRIMEROS = [
     'Maria', 'Jose', 'Ana', 'Carlos', 'Lucia', 'Pedro', 'Rosa', 'Oscar', 'Carmen', 'Luis',
     'Patricia', 'Miguel', 'Sandra', 'Francisco', 'Glenda', 'Walter', 'Yolanda', 'Marvin', 'Xiomara', 'Boris',
+    'Norma', 'Ricardo', 'Silvia', 'Ernesto', 'Adela', 'Hector', 'Olga', 'Sergio', 'Irma', 'Alfredo',
+    'Edgar', 'Paula', 'Gilberto', 'Moises', 'Teresa', 'Abel', 'Danilo', 'Elmer', 'Noel', 'Karla',
+    'Domingo', 'Flor', 'Cesar', 'Darwin', 'Efrain', 'Israel', 'Maximo', 'Wilmer', 'Samuel', 'Ulises',
   ];
   const SEGUNDOS = [
     'Elena', 'Alberto', 'Beatriz', 'Daniel', 'Marina', 'Antonio', 'Isabel', 'Javier', 'Marisol', 'Josefina',
-    'Alejandra', 'Angel', 'Patricia', 'Luis', 'Cristina', 'Antonio', 'Ivan', 'Lucia', 'Eduardo', 'Reyna',
+    'Alejandra', 'Angel', 'Cristina', 'Eduardo', 'Reyna', 'Raul', 'Victor', 'Griselda', 'Yadira', 'Marlen',
+    'Susana', 'Araceli', 'Mercedes', 'Ligia', 'Vanessa', 'Evelyn', 'Gloria', 'Ingrid', 'Julissa', 'Maribel',
   ];
   const APELLIDOS1 = [
     'Lopez', 'Garcia', 'Martinez', 'Rivas', 'Mejia', 'Torres', 'Zelaya', 'Baltodano', 'Corea', 'Jarquin',
     'Urbina', 'Tellez', 'Blandon', 'Guido', 'Duarte', 'Gutierrez', 'Centeno', 'Montenegro', 'Flores', 'Herrera',
+    'Castillo', 'Navarro', 'Chavez', 'Morales', 'Ortega', 'Pineda', 'Ramos', 'Cruz', 'Reyes', 'Silva',
   ];
   const APELLIDOS2 = [
     'Ruiz', 'Herrera', 'Castillo', 'Navarro', 'Chavez', 'Morales', 'Ortega', 'Pineda', 'Ramos', 'Cruz',
     'Reyes', 'Silva', 'Aguilar', 'Delgado', 'Vargas', 'Jimenez', 'Mendoza', 'Suarez', 'Espinoza', 'Perez',
+    'Rodriguez', 'Gonzalez', 'Ramirez', 'Sanchez', 'Diaz', 'Romero', 'Alvarez', 'Medina', 'Cordero', 'Benavides',
   ];
   const pool = [];
-  outer: for (let a = 0; a < PRIMEROS.length; a += 1) {
-    for (let b = 0; b < SEGUNDOS.length; b += 1) {
-      for (let c = 0; c < APELLIDOS1.length; c += 1) {
-        for (let d = 0; d < APELLIDOS2.length; d += 1) {
-          pool.push([PRIMEROS[a], SEGUNDOS[b], APELLIDOS1[c], APELLIDOS2[d]]);
-          if (pool.length >= TOTAL) break outer;
-        }
-      }
-    }
+  const seen = new Set();
+  for (let i = 0; pool.length < TOTAL; i += 1) {
+    const a = i % PRIMEROS.length;
+    const b = Math.floor(i / PRIMEROS.length) % SEGUNDOS.length;
+    const c =
+      Math.floor(i / (PRIMEROS.length * SEGUNDOS.length)) % APELLIDOS1.length;
+    const d =
+      Math.floor(i / (PRIMEROS.length * SEGUNDOS.length * APELLIDOS1.length)) %
+      APELLIDOS2.length;
+    const p = [PRIMEROS[a], SEGUNDOS[b], APELLIDOS1[c], APELLIDOS2[d]];
+    const nc = nombreCompleto(p);
+    if (seen.has(nc)) continue;
+    seen.add(nc);
+    pool.push(p);
+  }
+  for (let i = pool.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
   }
   return pool;
 })();
@@ -178,7 +194,7 @@ function filaCliente(i, cobradorEmail, perfil) {
 
 async function main() {
   let cobradores = await query(
-    `SELECT u.email, u.nombre_completo FROM Usuarios u
+    `SELECT u.id, u.email, u.nombre_completo FROM Usuarios u
      JOIN Roles r ON u.rol_id = r.id WHERE r.nombre = 'COBRADOR' AND u.activo = 1 AND u.deleted_at IS NULL`
   );
   if (!cobradores.length) {
@@ -226,12 +242,51 @@ async function main() {
 
   const outDir = path.join(__dirname, '../../output');
   fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `carga_masiva_200_${HOY}.csv`);
+  const csvName = `carga_masiva_200_${HOY}.csv`;
+  const xlsxName = `CrediCrece_carga_masiva_FINAL_${HOY}.xlsx`;
+  const outPath = path.join(outDir, csvName);
+  const rootCsv = path.join(__dirname, '../../../', csvName);
+  const rootXlsx = path.join(__dirname, '../../../', xlsxName);
+  const outXlsx = path.join(outDir, xlsxName);
   fs.writeFileSync(outPath, `\uFEFF${lines.join('\r\n')}`, 'utf8');
+  fs.writeFileSync(rootCsv, `\uFEFF${lines.join('\r\n')}`, 'utf8');
 
+  const filasExcel = filas.map((f) => {
+    const row = {};
+    for (const c of columnas) row[c] = f[c] ?? '';
+    return row;
+  });
+  const INSTRUCCIONES = [
+    { campo: 'cedula', nota: 'Obligatorio. 14 caracteres: 13 números + letra (ej. 0011208760015A).' },
+    { campo: 'cobrador_email', nota: 'Email del cobrador (hoja Cobradores).' },
+    { campo: 'saldo_pendiente', nota: 'Saldo actual. Debe cuadrar con monto_pagado_historico + total del crédito.' },
+    { campo: 'monto_pagado_historico', nota: 'Abonado antes de la app (= total a pagar − saldo_pendiente).' },
+    { campo: 'semanas_pagadas', nota: 'Dejar vacío. Use saldo_pendiente como verdad.' },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(filasExcel, { header: columnas }), 'Cartera');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(INSTRUCCIONES), 'Instrucciones');
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(
+      cobradores.map((c) => ({
+        cobrador_email: c.email,
+        cobrador_id: c.id || '',
+        nombre: c.nombre_completo,
+      }))
+    ),
+    'Cobradores'
+  );
+  XLSX.writeFile(wb, outXlsx);
+  fs.copyFileSync(outXlsx, rootXlsx);
+
+  const nombresUnicos = new Set(filas.map((f) => f.nombre_completo)).size;
   console.log(`\n📋 Carga masiva generada — fecha corte: ${HOY}`);
-  console.log(`   Filas: ${TOTAL} (${vencidosCount} con vencimiento antes de hoy)`);
-  console.log(`   Archivo: ${outPath}\n`);
+  console.log(`   Filas: ${TOTAL} | Nombres únicos: ${nombresUnicos} (${vencidosCount} vencidos)`);
+  console.log(`   CSV:   ${outPath}`);
+  console.log(`   CSV:   ${rootCsv}`);
+  console.log(`   Excel: ${outXlsx}`);
+  console.log(`   Excel: ${rootXlsx}\n`);
   console.log('Vencidos (primeros):');
   filas
     .filter((f) => f._vencido)

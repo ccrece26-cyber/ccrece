@@ -4,7 +4,7 @@
  *
  * Uso: CONFIRM_LIMPIAR_CARTERA=yes node src/scripts/limpiar-cartera-pre-carga.js
  */
-require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+require('dotenv').config({ path: require('path').join(__dirname, '../../.env.nuevo') });
 const { query, pool } = require('../config/db');
 
 const TABLAS = [

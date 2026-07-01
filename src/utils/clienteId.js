@@ -1,13 +1,10 @@
 const { v4: uuidv4 } = require('uuid');
 
 async function obtenerMaxSecuencia(queryFn) {
-  const rows = await queryFn(`SELECT id FROM Clientes WHERE id LIKE 'CC-%'`);
-  let max = 0;
-  for (const r of rows) {
-    const m = /^CC-(\d+)$/.exec(r.id);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  }
-  return max;
+  const rows = await queryFn(
+    `SELECT MAX(CAST(SUBSTRING(id, 4) AS UNSIGNED)) AS m FROM Clientes WHERE id LIKE 'CC-%'`
+  );
+  return Number(rows[0]?.m || 0);
 }
 
 async function initSecuenciaCliente(queryFn) {

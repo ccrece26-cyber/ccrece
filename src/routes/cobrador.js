@@ -857,9 +857,15 @@ async function pushSync(req, res) {
         const esLiquidacion = Math.abs(montoEfectivo - liq.montoLiquidacion) < 0.02;
 
         if (!esLiquidacion && montoEfectivo > Number(prestamo.saldo_pendiente) + 0.01) {
-          throw new Error(
-            `Monto supera saldo pendiente (C$ ${Number(prestamo.saldo_pendiente).toFixed(2)})`
-          );
+          errores.push({
+            tipo: 'pago',
+            id: p.id,
+            code: 'monto_supera_saldo',
+            prestamo_id: p.prestamo_id,
+            saldo_nube: Number(prestamo.saldo_pendiente),
+            message: `Monto supera saldo pendiente (C$ ${Number(prestamo.saldo_pendiente).toFixed(2)})`,
+          });
+          continue;
         }
 
         await conn.execute(

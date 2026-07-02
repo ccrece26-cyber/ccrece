@@ -1542,6 +1542,29 @@ async function getReporte(req, res) {
         const data = await armarReportePerdidas(desde, hasta);
         return res.json({ success: true, data });
       }
+      case 'diario-cobros': {
+        const { buildReporteDiarioContable } = require('../utils/reporteDiarioContable');
+        if (desde === hasta) {
+          const data = await buildReporteDiarioContable(desde);
+          return res.json({ success: true, data });
+        }
+        const reportes = [];
+        const d0 = new Date(`${desde}T12:00:00`);
+        const d1 = new Date(`${hasta}T12:00:00`);
+        for (let d = new Date(d0); d <= d1; d.setDate(d.getDate() + 1)) {
+          const iso = d.toISOString().slice(0, 10);
+          reportes.push(await buildReporteDiarioContable(iso));
+        }
+        return res.json({
+          success: true,
+          data: {
+            tipo: 'DIARIO DE COBROS (RANGO)',
+            periodo: { desde, hasta },
+            reportes,
+            timestamp: ts,
+          },
+        });
+      }
       case 'arqueo': {
         const resumen = await query(
           `SELECT COUNT(*) AS cierres_registrados,

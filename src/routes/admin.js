@@ -1033,9 +1033,9 @@ async function listPagosDetalle(req, res) {
       desde,
       hasta,
       fecha: desde === hasta ? desde : null,
-      pagos,
-      cuotas: cuotasMarcadas,
-      clientes,
+      pagos: pagos.map((p) => ({ ...p, codigo_cliente: p.cliente_id })),
+      cuotas: cuotasMarcadas.map((c) => ({ ...c, codigo_cliente: c.cliente_id })),
+      clientes: clientes.map((c) => ({ ...c, codigo_cliente: c.cliente_id })),
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -1103,7 +1103,7 @@ async function getEstadoCuentaCliente(req, res) {
 
     return res.json({
       success: true,
-      cliente,
+      cliente: { ...cliente, codigo_cliente: cliente.id },
       prestamo_activo: prestamoActivo,
       prestamos,
       cuotas,
@@ -1404,9 +1404,21 @@ async function getReporte(req, res) {
            GROUP BY u.id, u.nombre_completo ORDER BY monto DESC`,
           [inicio, fin]
         );
+        const filas = await query(
+          `SELECT c.id AS codigo_cliente, c.nombre_completo, c.cedula,
+                  u.nombre_completo AS cobrador,
+                  p.prestamo_id, p.fecha_pago, p.monto_pagado
+           FROM Pagos p
+           JOIN Prestamos pr ON pr.id = p.prestamo_id AND pr.deleted_at IS NULL
+           JOIN Clientes c ON c.id = pr.cliente_id AND c.deleted_at IS NULL
+           LEFT JOIN Usuarios u ON p.cobrador_id = u.id
+           WHERE p.deleted_at IS NULL AND p.fecha_pago >= ? AND p.fecha_pago < ?
+           ORDER BY p.fecha_pago DESC`,
+          [inicio, fin]
+        );
         return res.json({
           success: true,
-          data: { tipo: 'RECUPERACIÓN', periodo: { desde, hasta }, resumen: resumen[0], detallePorCobrador, timestamp: ts },
+          data: { tipo: 'RECUPERACIÓN', periodo: { desde, hasta }, resumen: resumen[0], detallePorCobrador, filas, timestamp: ts },
         });
       }
       case 'cartera': {
@@ -1421,9 +1433,17 @@ async function getReporte(req, res) {
           `SELECT estado, COUNT(*) AS cantidad, COALESCE(SUM(saldo_pendiente),0) AS monto
            FROM Prestamos WHERE deleted_at IS NULL GROUP BY estado`
         );
+        const filas = await query(
+          `SELECT c.id AS codigo_cliente, c.nombre_completo, c.cedula,
+                  p.id AS prestamo_id, p.saldo_pendiente, p.cuota_semanal_base, p.estado
+           FROM Prestamos p
+           JOIN Clientes c ON p.cliente_id = c.id AND c.deleted_at IS NULL
+           WHERE p.deleted_at IS NULL AND p.estado = 'Activo'
+           ORDER BY c.nombre_completo`
+        );
         return res.json({
           success: true,
-          data: { tipo: 'CARTERA ACTIVA', resumen: resumen[0], porEstado, timestamp: ts },
+          data: { tipo: 'CARTERA ACTIVA', resumen: resumen[0], porEstado, filas, timestamp: ts },
         });
       }
       case 'riesgo': {
@@ -1511,9 +1531,21 @@ async function getReporte(req, res) {
            GROUP BY motivo ORDER BY cantidad DESC`,
           [inicio, fin]
         );
+        const filas = await query(
+          `SELECT c.id AS codigo_cliente, c.nombre_completo, c.cedula,
+                  u.nombre_completo AS cobrador,
+                  g.prestamo_id, g.motivo, g.fecha_gestion
+           FROM Gestiones_No_Pago g
+           JOIN Prestamos p ON p.id = g.prestamo_id AND p.deleted_at IS NULL
+           JOIN Clientes c ON c.id = p.cliente_id AND c.deleted_at IS NULL
+           LEFT JOIN Usuarios u ON g.cobrador_id = u.id
+           WHERE g.deleted_at IS NULL AND g.fecha_gestion >= ? AND g.fecha_gestion < ?
+           ORDER BY g.fecha_gestion DESC`,
+          [inicio, fin]
+        );
         return res.json({
           success: true,
-          data: { tipo: 'GESTIONES NO PAGO', periodo: { desde, hasta }, resumen: resumen[0], porMotivo, timestamp: ts },
+          data: { tipo: 'GESTIONES NO PAGO', periodo: { desde, hasta }, resumen: resumen[0], porMotivo, filas, timestamp: ts },
         });
       }
       case 'clientes-nuevos': {

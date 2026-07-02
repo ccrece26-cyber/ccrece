@@ -261,6 +261,7 @@ async function buildReporteDiarioContable(fechaISO = hoyISO()) {
     lineas,
     gestiones_no_pago: gestiones.map((g) => ({
       fecha: fmtFechaHora(g.fecha_gestion),
+      codigo_cliente: g.cliente_id,
       cliente: g.nombre_completo,
       cedula: g.cedula,
       cobrador: g.cobrador_nombre,

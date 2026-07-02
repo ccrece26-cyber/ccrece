@@ -62,6 +62,17 @@ function esCuotaFantasma(pendiente, saldoPrestamo, visitaTeorica) {
   return false;
 }
 
+/** Parcial con abono previo y resto menor a una visita — remanente de importación, no es la cuota del día. */
+function esRemanenteParcialAgenda(cuota, visitaTeorica) {
+  if (!cuota || cuota.estado !== 'Parcial') return false;
+  const pag = Number(cuota.monto_pagado || 0);
+  if (pag <= 0.009) return false;
+  const pend = pendienteCuota(cuota);
+  const visita = Number(visitaTeorica || 0);
+  if (visita < 5 || pend < 0.01) return false;
+  return pend < visita - 0.5;
+}
+
 function seleccionarCuotaAgenda(cuotasDelPrestamo, prestamo, hoy, esCuotaDiaDesembolso, montoVisitaHoyFn) {
   const hoyStr = hoy ? String(hoy).slice(0, 10) : null;
   const visita = montoVisitaHoyFn(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro);
@@ -73,6 +84,7 @@ function seleccionarCuotaAgenda(cuotasDelPrestamo, prestamo, hoy, esCuotaDiaDese
     if (hoyStr && fechaCuota && fechaCuota > hoyStr) continue;
     const pendiente = pendienteCuota(c);
     if (esCuotaFantasma(pendiente, saldo, visita)) continue;
+    if (esRemanenteParcialAgenda(c, visita)) continue;
     return c;
   }
   return null;
@@ -84,7 +96,14 @@ function montoCobroDelDia(cuotaPend, prestamo, montoVisitaHoyFn) {
     ? pendienteCuota(cuotaPend)
     : visitaTeorica;
   const saldo = Number(prestamo?.saldo_pendiente || 0);
-  if (saldo > 5 && montoRaw < 5 && visitaTeorica >= 5) {
+  if (
+    cuotaPend &&
+    visitaTeorica >= 5 &&
+    saldo >= visitaTeorica &&
+    esRemanenteParcialAgenda(cuotaPend, visitaTeorica)
+  ) {
+    montoRaw = visitaTeorica;
+  } else if (saldo > 5 && montoRaw < 5 && visitaTeorica >= 5) {
     montoRaw = visitaTeorica;
   }
   return montoRaw;
@@ -98,6 +117,7 @@ module.exports = {
   absorberResiduosCuotasEnMemoria,
   absorberResiduosCuotas,
   esCuotaFantasma,
+  esRemanenteParcialAgenda,
   seleccionarCuotaAgenda,
   montoCobroDelDia,
 };

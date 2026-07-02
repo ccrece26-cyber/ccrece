@@ -3,6 +3,9 @@ const { loadAgendaAdminHoy } = require('../utils/rutaDiariaAdmin');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { registrarPagoEnNube, registrarGestionNoPagoEnNube } = require('../utils/registrarPagoNube');
 const { capMontoAlSaldo } = require('../utils/cobroMontos');
+const { seleccionarCuotaAgenda, montoCobroDelDia } = require('../utils/cuotasCalendario');
+const { montoVisitaHoy, esCuotaDiaDesembolso } = require('../utils/diasCobro');
+const { hoyISO } = require('../utils/zonaHoraria');
 const {
   ensureRutaForOperador,
   agregarClienteARuta,
@@ -152,17 +155,22 @@ async function getResumenCobroCampo(req, res) {
         return res.status(404).json({ success: false, message: 'Prestamo no encontrado' });
       }
       const prestamo = prestRows[0];
-      const [cuotaPend] = await conn.execute(
+      const hoy = hoyISO();
+      const [cuotasPend] = await conn.execute(
         `SELECT id, monto_programado, monto_pagado, fecha_programada, estado
          FROM Cuotas_Calendario
          WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL
-         ORDER BY fecha_programada ASC LIMIT 1`,
+         ORDER BY fecha_programada ASC`,
         [prestamoId]
       );
-      const cuota = cuotaPend[0];
-      const cuotaDiaRaw = cuota
-        ? Math.max(0, Number((Number(cuota.monto_programado) - Number(cuota.monto_pagado || 0)).toFixed(2)))
-        : 0;
+      const cuotaSel = seleccionarCuotaAgenda(
+        cuotasPend,
+        prestamo,
+        hoy,
+        esCuotaDiaDesembolso,
+        montoVisitaHoy
+      );
+      const cuotaDiaRaw = montoCobroDelDia(cuotaSel, prestamo, montoVisitaHoy);
       const cuotaDia = capMontoAlSaldo(cuotaDiaRaw, prestamo.saldo_pendiente);
       const [pend] = await conn.execute(
         `SELECT COUNT(*) AS n FROM Cuotas_Calendario

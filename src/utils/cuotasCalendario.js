@@ -1,6 +1,12 @@
 /** Residuo menor a C$1 por redondeo de cuotas — se absorbe automáticamente. */
 const UMBRAL_RESIDUO_CUOTA = 1;
 
+const { toFechaISO } = require('./zonaHoraria');
+
+function fechaCuotaISO(cuota) {
+  return toFechaISO(cuota?.fecha_programada) || String(cuota?.fecha_programada || '').slice(0, 10);
+}
+
 function pendienteCuota(cuota) {
   return Math.max(
     0,
@@ -63,7 +69,7 @@ function seleccionarCuotaAgenda(cuotasDelPrestamo, prestamo, hoy, esCuotaDiaDese
 
   for (const c of cuotasDelPrestamo) {
     if (esCuotaDiaDesembolso(c, prestamo)) continue;
-    const fechaCuota = String(c.fecha_programada || '').slice(0, 10);
+    const fechaCuota = fechaCuotaISO(c);
     if (hoyStr && fechaCuota && fechaCuota > hoyStr) continue;
     const pendiente = pendienteCuota(c);
     if (esCuotaFantasma(pendiente, saldo, visita)) continue;

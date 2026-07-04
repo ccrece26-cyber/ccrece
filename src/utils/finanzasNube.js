@@ -96,6 +96,38 @@ const generarAgendaDeCobro = (fechaInicioISO, plazoSemanas, diasDeCobro = ['LUNE
   return agenda.sort((a, b) => a.fecha_programada.localeCompare(b.fecha_programada));
 };
 
+/** Ajusta la agenda para que suma(monto_programado) === montoTotalPagar (redondeo / visitas de más). */
+function ajustarAgendaAlMontoTotal(agenda, montoTotalPagar) {
+  if (!Array.isArray(agenda) || !agenda.length) return agenda;
+  const total = Number(montoTotalPagar || 0);
+  if (total <= 0) return agenda;
+
+  let sum = Number(
+    agenda.reduce((s, c) => s + Number(c.monto_programado || 0), 0).toFixed(2)
+  );
+
+  while (agenda.length > 1 && sum > total + 0.01) {
+    const last = agenda[agenda.length - 1];
+    sum = Number((sum - Number(last.monto_programado || 0)).toFixed(2));
+    agenda.pop();
+  }
+
+  if (agenda.length && sum > total + 0.01) {
+    const last = agenda[agenda.length - 1];
+    const excess = Number((sum - total).toFixed(2));
+    last.monto_programado = Number((Number(last.monto_programado) - excess).toFixed(2));
+    sum = total;
+  }
+
+  if (agenda.length && sum < total - 0.01) {
+    const last = agenda[agenda.length - 1];
+    const diff = Number((total - sum).toFixed(2));
+    last.monto_programado = Number((Number(last.monto_programado) + diff).toFixed(2));
+  }
+
+  return agenda;
+}
+
 const numSeguro = (v, def = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
@@ -226,6 +258,7 @@ module.exports = {
   parseTasaMensualInput,
   calcularCuotaYDistribucion,
   generarAgendaDeCobro,
+  ajustarAgendaAlMontoTotal,
   calcularLiquidacionAnticipada,
   fechaVencimientoCredito,
   prestamoEstaVencido,

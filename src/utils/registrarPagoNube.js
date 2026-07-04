@@ -2,8 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { calcularLiquidacionAnticipada } = require('./finanzasNube');
 const { exigirUsuarioActivo } = require('./assertUsuarioActivo');
 const { rangoDiaLocal } = require('./fechasSql');
-const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
-const { normalizarAbonoCuota, absorberResiduosCuotas } = require('./cuotasCalendario');
+const { normalizarAbonoCuota, absorberResiduosCuotas, sincronizarCuotasTrasCierrePagado } = require('./cuotasCalendario');
 
 async function resolverCobradorAsignado(conn, prestamoId) {
   const [rows] = await conn.execute(
@@ -149,11 +148,7 @@ async function registrarPagoEnNube(conn, opts) {
   );
 
   if (esLiquidacion) {
-    await conn.execute(
-      `UPDATE Cuotas_Calendario SET monto_pagado = monto_programado, estado = 'Pagada', updated_at = NOW(), is_synced = 1
-       WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,
-      [prestamoId]
-    );
+    await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
     await conn.execute(
       `UPDATE Prestamos SET saldo_pendiente = 0,
         monto_total_pagar = ?,
@@ -170,15 +165,21 @@ async function registrarPagoEnNube(conn, opts) {
         prestamoId,
       ]
     );
+    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
   } else {
     await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
-    if (estadoPrestamo === 'Pagado') {
-      await voidarCuotasRestantesAlCerrar(conn, prestamoId);
-    }
+    const nuevoSaldo = Math.max(
+      0,
+      Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2))
+    );
+    const estadoPrestamo = nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
     await conn.execute(
       `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
       [nuevoSaldo, estadoPrestamo, prestamoId]
     );
+    if (estadoPrestamo === 'Pagado') {
+      await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
+    }
   }
 
   return {
@@ -206,6 +207,33 @@ async function registrarGestionNoPagoEnNube(conn, opts) {
   return { id, cobrador_id: cobradorRegistro };
 }
 
+/** Reparte de cero el calendario según la suma real de Pagos (corrige liquidaciones). */
+async function redistribuirCuotasDesdePagos(conn, prestamoId) {
+  await conn.execute(
+    `UPDATE Cuotas_Calendario SET monto_pagado = 0, estado = 'Programada', updated_at = NOW(), is_synced = 1
+     WHERE prestamo_id = ? AND deleted_at IS NULL`,
+    [prestamoId]
+  );
+  const [pagos] = await conn.execute(
+    `SELECT monto_pagado FROM Pagos
+     WHERE prestamo_id = ? AND deleted_at IS NULL
+     ORDER BY fecha_pago ASC`,
+    [prestamoId]
+  );
+  for (const pg of pagos) {
+    await aplicarMontoACuotas(conn, prestamoId, Number(pg.monto_pagado));
+  }
+  const [prestamo] = await conn.execute(
+    `SELECT estado FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [prestamoId]
+  );
+  const estado = prestamo[0]?.estado || 'Activo';
+  if (estado === 'Pagado' || String(estado).includes('Pagado')) {
+    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
+  }
+  return recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
+}
+
 async function recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId) {
   const [rows] = await conn.execute(
     `SELECT COALESCE(SUM(GREATEST(0, monto_programado - COALESCE(monto_pagado, 0))), 0) AS saldo
@@ -227,5 +255,6 @@ module.exports = {
   registrarGestionNoPagoEnNube,
   aplicarMontoACuotas,
   revertirMontoDeCuotas,
+  redistribuirCuotasDesdePagos,
   recalcularSaldoPrestamoDesdeCuotas,
 };

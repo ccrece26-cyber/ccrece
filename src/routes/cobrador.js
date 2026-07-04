@@ -19,7 +19,8 @@ const { hoyISO } = require('../utils/zonaHoraria');
 const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
-const { capMontoAlSaldo, voidarCuotasRestantesAlCerrar } = require('../utils/cobroMontos');
+const { capMontoAlSaldo } = require('../utils/cobroMontos');
+const { sincronizarCuotasTrasCierrePagado } = require('../utils/cuotasCalendario');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
@@ -337,6 +338,78 @@ const registrarFiadorSync = async (
   return fid;
 };
 
+/** Resuelve id de cliente en TiDB (id local, mapa o cédula). */
+async function resolverClienteIdEnNube(conn, localId, idMapClientes, { cedula, cobradorId } = {}) {
+  const candidatos = [];
+  if (localId) {
+    if (idMapClientes[localId]) candidatos.push(idMapClientes[localId]);
+    candidatos.push(localId);
+  }
+  for (const cid of candidatos) {
+    const [r] = await conn.execute(
+      'SELECT id FROM Clientes WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+      [cid]
+    );
+    if (r.length) return r[0].id;
+  }
+  if (cedula) {
+    const val = validarCedula(cedula);
+    if (val.ok) {
+      const [r] = await conn.execute(
+        'SELECT id FROM Clientes WHERE cedula = ? AND deleted_at IS NULL LIMIT 1',
+        [val.cedula]
+      );
+      if (r.length) {
+        if (localId) idMapClientes[localId] = r[0].id;
+        return r[0].id;
+      }
+    }
+  }
+  if (cobradorId && localId && esIdClienteOficial(localId)) {
+    const [r] = await conn.execute(
+      `SELECT id FROM Clientes WHERE id = ? AND cobrador_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [localId, cobradorId]
+    );
+    if (r.length) return r[0].id;
+  }
+  return null;
+}
+
+/** Si el préstamo local no existe en nube, busca el activo del cliente (p. ej. tras recarga de cartera). */
+async function resolverPrestamoIdEnNube(
+  conn,
+  prestamoId,
+  { clienteId, clienteCedula, cobradorId, idMapClientes, idMapPrestamos } = {}
+) {
+  if (idMapPrestamos?.[prestamoId]) return idMapPrestamos[prestamoId];
+  const [ex] = await conn.execute(
+    'SELECT id FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+    [prestamoId]
+  );
+  if (ex.length) return ex[0].id;
+
+  let cid = clienteId;
+  if (!cid && clienteCedula) {
+    cid = await resolverClienteIdEnNube(conn, null, idMapClientes || {}, {
+      cedula: clienteCedula,
+      cobradorId,
+    });
+  }
+  if (cid) {
+    const [activo] = await conn.execute(
+      `SELECT id FROM Prestamos
+       WHERE cliente_id = ? AND estado = 'Activo' AND deleted_at IS NULL
+       ORDER BY fecha_desembolso DESC LIMIT 1`,
+      [cid]
+    );
+    if (activo.length) {
+      if (idMapPrestamos && prestamoId) idMapPrestamos[prestamoId] = activo[0].id;
+      return activo[0].id;
+    }
+  }
+  return null;
+}
+
 /**
  * Push desde cobrador: clientes/prestamos primero, luego pagos y gestiones.
  */
@@ -345,6 +418,7 @@ async function pushSync(req, res) {
   let procesados = 0;
   const errores = [];
   const idMapClientes = {};
+  const idMapPrestamos = {};
   const synced = {
     clientes: [],
     fiadores: [],
@@ -492,10 +566,14 @@ async function pushSync(req, res) {
 
     for (const p of prestamosNuevos) {
       try {
-        const clienteId = idMapClientes[p.cliente_id] || p.cliente_id;
-        const [clienteOk] = await conn.execute('SELECT id FROM Clientes WHERE id = ?', [clienteId]);
-        if (!clienteOk.length) {
-          throw new Error(`Cliente ${clienteId} no existe en TiDB. Sincronice el cliente primero.`);
+        const clienteId = await resolverClienteIdEnNube(conn, p.cliente_id, idMapClientes, {
+          cedula: p.cliente_cedula,
+          cobradorId,
+        });
+        if (!clienteId) {
+          throw new Error(
+            `Cliente ${p.cliente_id || p.cliente_cedula || '?'} no existe en TiDB. Sincronice el cliente primero.`
+          );
         }
 
         const tieneFiador = !!txt(p.fiador_id);
@@ -661,10 +739,12 @@ async function pushSync(req, res) {
 
     for (const f of fiadores) {
       try {
-        const clienteId = idMapClientes[f.cliente_id] || f.cliente_id;
-        const [clienteOk] = await conn.execute('SELECT id FROM Clientes WHERE id = ?', [clienteId]);
-        if (!clienteOk.length) {
-          throw new Error(`Cliente ${clienteId} no existe en TiDB para fiador.`);
+        const clienteId = await resolverClienteIdEnNube(conn, f.cliente_id, idMapClientes, {
+          cedula: f.cliente_cedula,
+          cobradorId,
+        });
+        if (!clienteId) {
+          throw new Error(`Cliente ${f.cliente_id || f.cliente_cedula || '?'} no existe en TiDB para fiador.`);
         }
         const localKey = txt(f.id) || `tmp-${f.cedula}`;
         if (syncedFiadorIds.has(localKey) || (f.id && syncedFiadorIds.has(f.id))) {
@@ -810,14 +890,25 @@ async function pushSync(req, res) {
           continue;
         }
 
+        const prestamoIdNube = await resolverPrestamoIdEnNube(conn, p.prestamo_id, {
+          clienteId: idMapClientes[p.cliente_id] || p.cliente_id,
+          clienteCedula: p.cliente_cedula,
+          cobradorId: p.cobrador_id || cobradorId,
+          idMapClientes,
+          idMapPrestamos,
+        });
+        if (!prestamoIdNube) {
+          throw new Error(`Prestamo ${p.prestamo_id} no existe en TiDB aun.`);
+        }
         const [prestamoOk] = await conn.execute(
           'SELECT * FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
-          [p.prestamo_id]
+          [prestamoIdNube]
         );
         if (!prestamoOk.length) {
           throw new Error(`Prestamo ${p.prestamo_id} no existe en TiDB aun.`);
         }
         const prestamo = prestamoOk[0];
+        const prestamoIdPago = prestamoIdNube;
 
         const { inicio, fin } = rangoDiaLocal(p.fecha_pago || new Date());
         const [cobroHoy] = await conn.execute(
@@ -825,7 +916,7 @@ async function pushSync(req, res) {
            WHERE prestamo_id = ? AND cobrador_id = ? AND deleted_at IS NULL
              AND fecha_pago >= ? AND fecha_pago < ?
            LIMIT 1`,
-          [p.prestamo_id, p.cobrador_id, inicio, fin]
+          [prestamoIdPago, p.cobrador_id, inicio, fin]
         );
         if (cobroHoy.length) {
           errores.push({
@@ -836,7 +927,7 @@ async function pushSync(req, res) {
               Number(cobroHoy[0].registrado_por_admin) === 1
                 ? 'Este credito ya fue cobrado hoy por el administrador.'
                 : 'Este credito ya tiene un cobro registrado hoy.',
-            prestamo_id: p.prestamo_id,
+            prestamo_id: prestamoIdPago,
             pago_existente_id: cobroHoy[0].id,
           });
           continue;
@@ -848,7 +939,7 @@ async function pushSync(req, res) {
         const [pagadoRows] = await conn.execute(
           `SELECT COALESCE(SUM(monto_pagado), 0) AS total FROM Pagos
            WHERE prestamo_id = ? AND deleted_at IS NULL`,
-          [p.prestamo_id]
+          [prestamoIdPago]
         );
         const pagadoAcumulado = Number(pagadoRows[0]?.total || 0);
         const liq = calcularLiquidacionAnticipada(prestamo, new Date(p.fecha_pago || new Date()), {
@@ -874,7 +965,7 @@ async function pushSync(req, res) {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
           [
             p.id,
-            p.prestamo_id,
+            prestamoIdPago,
             p.cobrador_id,
             montoEfectivo,
             p.fecha_pago,
@@ -886,11 +977,7 @@ async function pushSync(req, res) {
         );
 
         if (esLiquidacion) {
-          await conn.execute(
-            `UPDATE Cuotas_Calendario SET monto_pagado = monto_programado, estado = 'Pagada', updated_at = NOW(), is_synced = 1
-             WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,
-            [p.prestamo_id]
-          );
+          await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
           await conn.execute(
             `UPDATE Prestamos SET saldo_pendiente = 0,
               monto_total_pagar = ?,
@@ -904,29 +991,30 @@ async function pushSync(req, res) {
                   montoEfectivo
                 ).toFixed(2)
               ),
-              p.prestamo_id,
+              prestamoIdPago,
             ]
           );
+          await sincronizarCuotasTrasCierrePagado(conn, prestamoIdPago);
         } else {
-          await aplicarMontoACuotas(conn, p.prestamo_id, montoEfectivo);
+          await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
           const nuevoSaldo = Math.max(
             0,
             Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2))
           );
           const estadoPrestamo = nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
-          if (estadoPrestamo === 'Pagado') {
-            await voidarCuotasRestantesAlCerrar(conn, p.prestamo_id);
-          }
           await conn.execute(
             `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-            [nuevoSaldo, estadoPrestamo, p.prestamo_id]
+            [nuevoSaldo, estadoPrestamo, prestamoIdPago]
           );
+          if (estadoPrestamo === 'Pagado') {
+            await sincronizarCuotasTrasCierrePagado(conn, prestamoIdPago);
+          }
         }
 
         synced.pagos.push(p.id);
         if (!Number(p.registrado_por_admin)) {
           cobrosParaNotificar.push({
-            prestamo_id: p.prestamo_id,
+            prestamo_id: prestamoIdPago,
             cobrador_id: p.cobrador_id,
             monto: montoEfectivo,
             liquidacion: esLiquidacion,
@@ -1153,6 +1241,7 @@ async function pushSync(req, res) {
       procesados,
       idMapClientes,
       idMapFiadores: Object.keys(idMapFiadores).length ? idMapFiadores : undefined,
+      idMapPrestamos: Object.keys(idMapPrestamos).length ? idMapPrestamos : undefined,
       fiadorIdPorPrestamo: Object.keys(fiadorIdPorPrestamo).length ? fiadorIdPorPrestamo : undefined,
       synced,
       errores: errores.length ? errores : undefined,

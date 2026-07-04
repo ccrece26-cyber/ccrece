@@ -8,12 +8,16 @@ const {
   normalizarAbonoCuota,
   absorberResiduosCuotasEnMemoria,
   absorberResiduosCuotas,
+  calcularToleranciaReconciliacionCuotas,
+  reconciliarCuotasConPagosInMemoria,
+  reconciliarCuotasConPagos,
+  sincronizarCuotasTrasCierrePagado,
 } = require('./cuotasCalendario');
-const { voidarCuotasRestantesAlCerrar } = require('./cobroMontos');
 const {
   parseTasaMensualInput,
   calcularCuotaYDistribucion,
   generarAgendaDeCobro,
+  ajustarAgendaAlMontoTotal,
 } = require('./finanzasNube');
 const { optimizarOrdenRuta } = require('./rutas');
 
@@ -253,11 +257,14 @@ function resolverImportacionFinanciera(fila) {
     fila.dias_de_cobro,
     fila.tasa_mensual
   );
-  const agenda = generarAgendaDeCobro(
-    fila.fecha_desembolso,
-    fila.plazo_semanas,
-    fila.dias_de_cobro,
-    fin.cuotaPorDiaDeCobro
+  const agenda = ajustarAgendaAlMontoTotal(
+    generarAgendaDeCobro(
+      fila.fecha_desembolso,
+      fila.plazo_semanas,
+      fila.dias_de_cobro,
+      fin.cuotaPorDiaDeCobro
+    ),
+    fin.montoTotalPagar
   );
   const total = fin.montoTotalPagar;
   const cuotasPorSemana = fila.dias_de_cobro.length || 1;
@@ -360,82 +367,6 @@ function aplicarMontoACuotasInMemoria(cuotas, monto) {
   absorberResiduosCuotasEnMemoria(cuotas);
 }
 
-function reconciliarCuotasConPagosInMemoria(cuotasRows, sumPagos, toleranciaMax = 120) {
-  const sumCuotas = Number(
-    cuotasRows.reduce((s, c) => s + Number(c.monto_pagado || 0), 0).toFixed(2)
-  );
-  let diff = Number((sumPagos - sumCuotas).toFixed(2));
-  if (Math.abs(diff) <= 0.01) return;
-
-  if (Math.abs(diff) > toleranciaMax) {
-    throw new Error(
-      `No se pudo reconciliar pagos vs cuotas: pagos C$ ${sumPagos.toFixed(2)}, cuotas C$ ${sumCuotas.toFixed(2)}`
-    );
-  }
-
-  const candidatas = cuotasRows.filter((c) => Number(c.monto_pagado || 0) > 0.009);
-  const orden = candidatas.length ? candidatas : cuotasRows;
-  for (let i = orden.length - 1; i >= 0 && Math.abs(diff) > 0.01; i -= 1) {
-    const cuota = orden[i];
-    const pagado = Number(cuota.monto_pagado || 0);
-    const prog = Number(cuota.monto_programado || 0);
-    const capped = Math.max(0, Number((pagado + diff).toFixed(2)));
-    const aplicado = Number((capped - pagado).toFixed(2));
-    if (aplicado === 0) continue;
-    cuota.monto_pagado = capped;
-    cuota.estado = capped >= prog - 0.01 ? 'Pagada' : capped > 0.009 ? 'Parcial' : 'Programada';
-    diff = Number((diff - aplicado).toFixed(2));
-  }
-  absorberResiduosCuotasEnMemoria(cuotasRows);
-}
-
-async function reconciliarCuotasConPagos(conn, prestamoId, toleranciaMax = 120) {
-  const [pagosRow] = await conn.execute(
-    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Pagos
-     WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
-  const sumPagos = Number(pagosRow[0]?.t || 0);
-  const [cuotasRows] = await conn.execute(
-    `SELECT id, monto_programado, monto_pagado, estado FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL
-     ORDER BY fecha_programada ASC`,
-    [prestamoId]
-  );
-  const sumCuotas = Number(
-    cuotasRows.reduce((s, c) => s + Number(c.monto_pagado || 0), 0).toFixed(2)
-  );
-  let diff = Number((sumPagos - sumCuotas).toFixed(2));
-  if (Math.abs(diff) <= 0.01) return;
-
-  if (Math.abs(diff) > toleranciaMax) {
-    throw new Error(
-      `No se pudo reconciliar pagos vs cuotas: pagos C$ ${sumPagos.toFixed(2)}, cuotas C$ ${sumCuotas.toFixed(2)}`
-    );
-  }
-
-  const candidatas = cuotasRows.filter((c) => Number(c.monto_pagado || 0) > 0.009);
-  const orden = candidatas.length ? candidatas : cuotasRows;
-  for (let i = orden.length - 1; i >= 0 && Math.abs(diff) > 0.01; i -= 1) {
-    const cuota = orden[i];
-    const pagado = Number(cuota.monto_pagado || 0);
-    const prog = Number(cuota.monto_programado || 0);
-    const nuevo = Number((pagado + diff).toFixed(2));
-    const capped = Math.max(0, nuevo);
-    const aplicado = Number((capped - pagado).toFixed(2));
-    if (aplicado === 0) continue;
-    const estado =
-      capped >= prog - 0.01 ? 'Pagada' : capped > 0.009 ? 'Parcial' : 'Programada';
-    await conn.execute(
-      `UPDATE Cuotas_Calendario SET monto_pagado = ?, estado = ?, updated_at = NOW(), is_synced = 1
-       WHERE id = ?`,
-      [capped, estado, cuota.id]
-    );
-    diff = Number((diff - aplicado).toFixed(2));
-  }
-  await absorberResiduosCuotas(conn, prestamoId);
-}
-
 async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 1.5) {
   const [rows] = await conn.execute(
     `SELECT monto_total_pagar, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
@@ -484,15 +415,21 @@ async function aplicarPagoHistoricoImportacion(conn, item) {
     [pagoId, prestamoId, cobradorId, monto, fechaPago, cobradorId]
   );
   await aplicarMontoACuotas(conn, prestamoId, monto, fecha);
-  await reconciliarCuotasConPagos(conn, prestamoId);
+  const [prestRows] = await conn.execute(
+    `SELECT monto_total_pagar FROM Prestamos WHERE id = ? LIMIT 1`,
+    [prestamoId]
+  );
+  const [cuotasRows] = await conn.execute(
+    `SELECT monto_programado, monto_pagado FROM Cuotas_Calendario
+     WHERE prestamo_id = ? AND deleted_at IS NULL`,
+    [prestamoId]
+  );
+  const tol = calcularToleranciaReconciliacionCuotas(prestRows[0]?.monto_total_pagar, cuotasRows);
+  await reconciliarCuotasConPagos(conn, prestamoId, tol);
 
   const [pagosRow] = await conn.execute(
     `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Pagos
      WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
-  const [prestRows] = await conn.execute(
-    `SELECT monto_total_pagar FROM Prestamos WHERE id = ? LIMIT 1`,
     [prestamoId]
   );
   const total = Number(prestRows[0]?.monto_total_pagar || 0);
@@ -500,7 +437,7 @@ async function aplicarPagoHistoricoImportacion(conn, item) {
   const nuevoSaldo = Math.max(0, Number((total - sumPagos).toFixed(2)));
   const estado = nuevoSaldo <= 0.01 ? 'Pagado' : 'Activo';
   if (estado === 'Pagado') {
-    await voidarCuotasRestantesAlCerrar(conn, prestamoId);
+    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
   }
   await conn.execute(
     `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
@@ -1009,12 +946,27 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       pagosInsert.map((p) => p.prestamo_id)
     );
     const cuotasDirty = new Map();
+    const pagosAcumuladoPorPrestamo = new Map();
+
+    for (const pg of pagosInsert) {
+      pagosAcumuladoPorPrestamo.set(
+        pg.prestamo_id,
+        Number((pagosAcumuladoPorPrestamo.get(pg.prestamo_id) || 0) + Number(pg.monto_pagado))
+      );
+    }
 
     for (const pg of pagosInsert) {
       const cuotas = cuotasPorPrestamo.get(pg.prestamo_id) || [];
       aplicarMontoACuotasInMemoria(cuotas, pg.monto_pagado);
-      reconciliarCuotasConPagosInMemoria(cuotas, pg.monto_pagado);
       cuotasDirty.set(pg.prestamo_id, cuotas);
+    }
+
+    for (const p of pendientesPago) {
+      const cuotas = cuotasDirty.get(p.prestamo_id);
+      if (!cuotas) continue;
+      const sumPagos = pagosAcumuladoPorPrestamo.get(p.prestamo_id) || 0;
+      const tol = calcularToleranciaReconciliacionCuotas(p.monto_total_pagar, cuotas);
+      reconciliarCuotasConPagosInMemoria(cuotas, sumPagos, tol);
     }
 
     const cuotaUpdates = [];
@@ -1037,9 +989,9 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     const prestamosUpdate = [];
     const liquidados = [];
     for (const p of pendientesPago) {
-      if (p.monto_pagado_historico <= 0.01) continue;
+      const sumPagos = pagosAcumuladoPorPrestamo.get(p.prestamo_id) || Number(p.monto_pagado_historico || 0);
+      if (sumPagos <= 0.01) continue;
       const total = Number(p.monto_total_pagar || 0);
-      const sumPagos = Number(p.monto_pagado_historico);
       const nuevoSaldo = Math.max(0, Number((total - sumPagos).toFixed(2)));
       const estado = nuevoSaldo <= 0.01 ? 'Pagado' : 'Activo';
       prestamosUpdate.push({
@@ -1062,19 +1014,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     }
 
     if (liquidados.length) {
-      const CHUNK = 50;
-      for (let i = 0; i < liquidados.length; i += CHUNK) {
-        const slice = liquidados.slice(i, i + CHUNK);
-        const ph = slice.map(() => '?').join(',');
-        await conn.execute(
-          `UPDATE Cuotas_Calendario SET
-            estado = 'Pagada',
-            monto_programado = COALESCE(monto_pagado, 0),
-            updated_at = NOW(),
-            is_synced = 1
-           WHERE prestamo_id IN (${ph}) AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,
-          slice
-        );
+      for (const prestamoId of liquidados) {
+        await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
       }
     }
   }

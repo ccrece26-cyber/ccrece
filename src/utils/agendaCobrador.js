@@ -408,23 +408,36 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
     const clientesCob = datos.clientes.filter((c) => c.ruta_cobrador_id === cob.id);
     const clienteIds = new Set(clientesCob.map((c) => c.id));
     const prestamosCob = datos.prestamos.filter((p) => clienteIds.has(p.cliente_id));
-    const pagosCob = datos.pagos_hoy.filter((pg) => clienteIds.has(pg.cliente_id));
-    const gestCob = datos.gestiones_hoy.filter((g) => clienteIds.has(g.cliente_id));
+    const pagosRuta = datos.pagos_hoy.filter((pg) => clienteIds.has(pg.cliente_id));
+    const pagosCob = datos.pagos_hoy.filter(
+      (pg) => pg.cobrador_id === cob.id || pg.operador_id === cob.id
+    );
+    const gestMerged = datos.gestiones_hoy.filter((g) => {
+      if (g.cobrador_id === cob.id || g.operador_id === cob.id) return true;
+      const pr = datos.prestamos.find((p) => p.id === g.prestamo_id);
+      return pr && clienteIds.has(pr.cliente_id);
+    });
 
     const armado = armarAgendaDesdeDatos(
       datos.hoy,
       clientesCob,
       prestamosCob,
       datos.cuotas,
-      pagosCob,
-      gestCob,
+      pagosRuta,
+      gestMerged,
       cob.id
     );
+
+    const montoCobradoReal = pagosCob.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
+    const cobrosRegistrados = pagosCob.length;
 
     filas.push({
       cobrador_id: cob.id,
       cobrador: cob.nombre_completo,
       ...armado.resumen,
+      cobrado: cobrosRegistrados > 0 ? cobrosRegistrados : armado.resumen.cobrado,
+      monto_cobrado: montoCobradoReal > 0 ? montoCobradoReal : armado.resumen.monto_cobrado,
+      cobros_registrados: cobrosRegistrados,
       cierre_caja: cierreMap.get(cob.id) || null,
       visitas: incluirVisitas ? armado.agenda : [],
     });

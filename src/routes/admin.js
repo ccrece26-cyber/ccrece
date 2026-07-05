@@ -15,6 +15,7 @@ const {
   vincularClientesCobradorARuta,
   ESTELI_CENTRO,
 } = require('../utils/rutas');
+const { bumpCarteraVersion } = require('../utils/carteraVersion');
 const {
   leerParametrosFinancieros,
   normalizarTasaMensualInput,
@@ -210,6 +211,7 @@ async function updateCliente(req, res) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [c.cobrador_id]);
       const rutaId = await sincronizarRutaClienteAsignado(id, c.cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
+      await bumpCarteraVersion();
       return res.json({ success: true, ruta_id: rutaId });
     }
 
@@ -233,10 +235,12 @@ async function asignarClienteCobrador(req, res) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [cobrador_id]);
       const rutaId = await sincronizarRutaClienteAsignado(id, cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
+      await bumpCarteraVersion();
       return res.json({ success: true, ruta_id: rutaId, mensaje: 'Cliente agregado a ruta optimizada' });
     }
 
     await sincronizarRutaClienteAsignado(id, null);
+    await bumpCarteraVersion();
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

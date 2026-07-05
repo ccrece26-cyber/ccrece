@@ -412,6 +412,10 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
     const pagosCob = datos.pagos_hoy.filter(
       (pg) => pg.cobrador_id === cob.id || pg.operador_id === cob.id
     );
+    /** Cobros en ruta de este cobrador que él mismo registró (no atribuir cobros ajenos por ruta). */
+    const pagosRutaCobrador = pagosRuta.filter(
+      (pg) => pg.cobrador_id === cob.id || pg.operador_id === cob.id
+    );
     const gestMerged = datos.gestiones_hoy.filter((g) => {
       if (g.cobrador_id === cob.id || g.operador_id === cob.id) return true;
       const pr = datos.prestamos.find((p) => p.id === g.prestamo_id);
@@ -423,7 +427,7 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       clientesCob,
       prestamosCob,
       datos.cuotas,
-      pagosRuta,
+      pagosRutaCobrador,
       gestMerged,
       cob.id
     );
@@ -435,8 +439,8 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       cobrador_id: cob.id,
       cobrador: cob.nombre_completo,
       ...armado.resumen,
-      cobrado: cobrosRegistrados > 0 ? cobrosRegistrados : armado.resumen.cobrado,
-      monto_cobrado: montoCobradoReal > 0 ? montoCobradoReal : armado.resumen.monto_cobrado,
+      cobrado: cobrosRegistrados,
+      monto_cobrado: montoCobradoReal,
       cobros_registrados: cobrosRegistrados,
       cierre_caja: cierreMap.get(cob.id) || null,
       visitas: incluirVisitas ? armado.agenda : [],

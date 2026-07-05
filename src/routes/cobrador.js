@@ -896,10 +896,8 @@ async function pushSync(req, res) {
 
     for (const p of pagos) {
       try {
-        const cobradorPago = cobradorId || p.cobrador_id;
-        const operadorPago = p.operador_id || cobradorId || p.cobrador_id;
-        p.cobrador_id = cobradorPago;
-        p.operador_id = operadorPago;
+        p.cobrador_id = cobradorId || p.cobrador_id;
+        p.operador_id = cobradorId || p.operador_id || p.cobrador_id;
         const [ex] = await conn.execute(
           'SELECT id, deleted_at, prestamo_id FROM Pagos WHERE id = ?',
           [p.id]

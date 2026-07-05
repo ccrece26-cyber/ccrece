@@ -985,7 +985,7 @@ async function pushSync(req, res) {
             tipo: 'pago',
             id: p.id,
             code: 'monto_supera_saldo',
-            prestamo_id: p.prestamo_id,
+            prestamo_id: prestamoIdPago,
             saldo_nube: Number(prestamo.saldo_pendiente),
             message: `Monto supera saldo pendiente (C$ ${Number(prestamo.saldo_pendiente).toFixed(2)})`,
           });

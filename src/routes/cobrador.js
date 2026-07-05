@@ -912,23 +912,29 @@ async function pushSync(req, res) {
 
         const { inicio, fin } = rangoDiaLocal(p.fecha_pago || new Date());
         const [cobroHoy] = await conn.execute(
-          `SELECT id, registrado_por_admin, operador_id FROM Pagos
-           WHERE prestamo_id = ? AND cobrador_id = ? AND deleted_at IS NULL
+          `SELECT id, registrado_por_admin, operador_id, cobrador_id FROM Pagos
+           WHERE prestamo_id = ? AND deleted_at IS NULL
              AND fecha_pago >= ? AND fecha_pago < ?
            LIMIT 1`,
-          [prestamoIdPago, p.cobrador_id, inicio, fin]
+          [prestamoIdPago, inicio, fin]
         );
         if (cobroHoy.length) {
+          const existente = cobroHoy[0];
+          if (existente.id === p.id) {
+            synced.pagos.push(p.id);
+            procesados++;
+            continue;
+          }
           errores.push({
             tipo: 'pago',
             id: p.id,
             code: 'cobro_ya_registrado',
             message:
-              Number(cobroHoy[0].registrado_por_admin) === 1
+              Number(existente.registrado_por_admin) === 1
                 ? 'Este credito ya fue cobrado hoy por el administrador.'
                 : 'Este credito ya tiene un cobro registrado hoy.',
             prestamo_id: prestamoIdPago,
-            pago_existente_id: cobroHoy[0].id,
+            pago_existente_id: existente.id,
           });
           continue;
         }

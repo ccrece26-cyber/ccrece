@@ -16,6 +16,10 @@ const {
   ESTELI_CENTRO,
 } = require('../utils/rutas');
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
+
+async function afterCarteraMutation(conn = null) {
+  await bumpCarteraVersion(conn);
+}
 const {
   leerParametrosFinancieros,
   normalizarTasaMensualInput,
@@ -174,6 +178,7 @@ async function createCliente(req, res) {
     }
 
     await conn.commit();
+    await afterCarteraMutation();
     return res.json({ success: true, id, secuencia: id });
   } catch (e) {
     await conn.rollback();
@@ -215,6 +220,7 @@ async function updateCliente(req, res) {
       return res.json({ success: true, ruta_id: rutaId });
     }
 
+    await bumpCarteraVersion();
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -450,6 +456,7 @@ async function updatePrestamoFrecuencia(req, res) {
        WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,
       [cuotaVisita, id]
     );
+    await afterCarteraMutation();
     return res.json({
       success: true,
       data: { id, dias_de_cobro: dias, frecuencia_semana: freq, cuota_por_visita: cuotaVisita },
@@ -646,6 +653,7 @@ async function asignarCobrador(req, res) {
       `UPDATE Rutas SET cobrador_id = ?, is_synced = 1, updated_at = NOW() WHERE id = ?`,
       [cobrador_id, rutaId]
     );
+    await afterCarteraMutation();
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -661,6 +669,7 @@ async function agregarClienteRuta(req, res) {
        VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE orden_visita = VALUES(orden_visita)`,
       [rutaId, cliente_id, orden_visita]
     );
+    await afterCarteraMutation();
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -683,6 +692,7 @@ async function crearRuta(req, res) {
         [rutaId, cid, orden++]
       );
     }
+    await afterCarteraMutation();
     return res.json({ success: true, id: rutaId });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -753,6 +763,7 @@ async function crearPrestamo(req, res) {
       [p.cliente_id]
     );
     await conn.commit();
+    await afterCarteraMutation(conn);
     return res.json({
       success: true,
       id,
@@ -775,6 +786,7 @@ async function syncRutasCobradores(req, res) {
     for (const c of cobradores) {
       await vincularClientesCobradorARuta(c.id);
     }
+    await afterCarteraMutation();
     return res.json({ success: true, ...result });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -791,6 +803,7 @@ async function optimizarRuta(req, res) {
        WHERE rc.ruta_id = ? ORDER BY rc.orden_visita`,
       [rutaId]
     );
+    await afterCarteraMutation();
     return res.json({ success: true, data: clientes, centro: ESTELI_CENTRO });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -1346,6 +1359,7 @@ async function renovacion(req, res) {
       [np.cliente_id]
     );
     await conn.commit();
+    await afterCarteraMutation(conn);
     return res.json({
       success: true,
       id: np.id,
@@ -1816,6 +1830,7 @@ async function importarCargaMasiva(req, res) {
     const data = await importarFilas(filas, query, getConnection, {
       optimizar_rutas: req.body?.optimizar_rutas === true,
     });
+    await afterCarteraMutation();
     return res.json({ success: true, data });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -1966,6 +1981,7 @@ async function aplicarProrroga(req, res) {
       operador_id: req.operadorId,
     });
     await conn.commit();
+    await afterCarteraMutation(conn);
     return res.json({ success: true, data: resultado });
   } catch (e) {
     await conn.rollback();
@@ -1985,6 +2001,7 @@ async function castigarPerdida(req, res) {
       operador_id: req.operadorId,
     });
     await conn.commit();
+    await afterCarteraMutation(conn);
     return res.json({ success: true, data: resultado });
   } catch (e) {
     await conn.rollback();

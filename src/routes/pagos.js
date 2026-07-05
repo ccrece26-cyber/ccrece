@@ -5,8 +5,8 @@ const { voidarCuotasRestantesAlCerrar } = require('../utils/cobroMontos');
 const { rangoDiaLocal } = require('../utils/fechasSql');
 
 /**
+ * @deprecated Prefer POST /api/cobrador/sync/push (cobradorEngine en la app).
  * Recibe lote de pagos offline desde SQLite y los persiste en TiDB Cloud.
- * Actualiza saldo_pendiente del préstamo y marca cuotas como pagadas proporcionalmente.
  */
 async function syncMasivo(req, res) {
   const { pagos } = req.body;
@@ -22,6 +22,7 @@ async function syncMasivo(req, res) {
   }
 
   const conn = await getConnection();
+  const omitidos = [];
   try {
     await conn.beginTransaction();
     let procesados = 0;
@@ -31,21 +32,35 @@ async function syncMasivo(req, res) {
         'SELECT id FROM Pagos WHERE id = ? AND deleted_at IS NULL',
         [pago.id]
       );
-      if (existente.length > 0) continue;
+      if (existente.length > 0) {
+        omitidos.push({ id: pago.id, code: 'pago_ya_existe', message: 'Pago ya registrado en nube.' });
+        continue;
+      }
 
       const [prestamoOk] = await conn.execute(
         'SELECT id, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
         [pago.prestamo_id]
       );
-      if (!prestamoOk.length) continue;
+      if (!prestamoOk.length) {
+        omitidos.push({ id: pago.id, code: 'prestamo_no_existe', message: 'Préstamo no encontrado.' });
+        continue;
+      }
 
       const { inicio, fin } = rangoDiaLocal(pago.fecha_pago || new Date());
       const [cobroHoy] = await conn.execute(
-        `SELECT id FROM Pagos WHERE prestamo_id = ? AND cobrador_id = ? AND deleted_at IS NULL
+        `SELECT id FROM Pagos WHERE prestamo_id = ? AND deleted_at IS NULL
            AND fecha_pago >= ? AND fecha_pago < ? LIMIT 1`,
-        [pago.prestamo_id, pago.cobrador_id, inicio, fin]
+        [pago.prestamo_id, inicio, fin]
       );
-      if (cobroHoy.length) continue;
+      if (cobroHoy.length) {
+        omitidos.push({
+          id: pago.id,
+          code: 'cobro_ya_registrado',
+          message: 'Este crédito ya tiene un cobro registrado hoy.',
+          pago_existente_id: cobroHoy[0].id,
+        });
+        continue;
+      }
 
       const monto = Number(pago.monto_pagado);
       const prestamo = prestamoOk[0];
@@ -79,7 +94,13 @@ async function syncMasivo(req, res) {
     }
 
     await conn.commit();
-    return res.json({ success: true, procesados });
+    const partial = omitidos.length > 0 && procesados > 0;
+    return res.json({
+      success: omitidos.length === 0,
+      partial,
+      procesados,
+      omitidos: omitidos.length ? omitidos : undefined,
+    });
   } catch (error) {
     await conn.rollback();
     console.error('Sync pagos error:', error.message);

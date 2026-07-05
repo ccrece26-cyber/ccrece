@@ -410,6 +410,31 @@ async function resolverPrestamoIdEnNube(
   return null;
 }
 
+const PUSH_ERROR_CODES = {
+  cliente: 'cliente_error',
+  prestamo: 'prestamo_error',
+  fiador: 'fiador_error',
+  cuota: 'cuota_error',
+  cuota_bulk: 'cuota_bulk_error',
+  garantia: 'garantia_error',
+  prestamo_garantia: 'prestamo_garantia_error',
+  pago: 'pago_error',
+  gestion: 'gestion_error',
+  renovacion: 'renovacion_error',
+  cierre_caja: 'cierre_error',
+  solicitud_correccion: 'solicitud_error',
+};
+
+function pushErr(errores, tipo, id, message, code, extra = {}) {
+  errores.push({
+    tipo,
+    id,
+    message,
+    code: code || PUSH_ERROR_CODES[tipo] || 'sync_error',
+    ...extra,
+  });
+}
+
 /**
  * Push desde cobrador: clientes/prestamos primero, luego pagos y gestiones.
  */
@@ -1028,7 +1053,7 @@ async function pushSync(req, res) {
         }
         procesados++;
       } catch (err) {
-        errores.push({ tipo: 'pago', id: p.id, message: err.message });
+        pushErr(errores, 'pago', p.id, err.message);
       }
     }
 
@@ -1038,6 +1063,28 @@ async function pushSync(req, res) {
         if (ex.length) {
           synced.gestiones.push(g.id);
           continue;
+        }
+        const prestamoIdG = g.prestamo_id;
+        if (prestamoIdG) {
+          const { inicio, fin } = rangoDiaLocal(g.fecha_gestion || new Date());
+          const [gestHoy] = await conn.execute(
+            `SELECT id FROM Gestiones_No_Pago
+             WHERE prestamo_id = ? AND deleted_at IS NULL
+               AND fecha_gestion >= ? AND fecha_gestion < ?
+             LIMIT 1`,
+            [prestamoIdG, inicio, fin]
+          );
+          if (gestHoy.length) {
+            pushErr(
+              errores,
+              'gestion',
+              g.id,
+              'Este credito ya tiene una gestion registrada hoy.',
+              'gestion_ya_registrada',
+              { prestamo_id: prestamoIdG, gestion_existente_id: gestHoy[0].id }
+            );
+            continue;
+          }
         }
         await conn.execute(
           `INSERT INTO Gestiones_No_Pago (id, prestamo_id, cobrador_id, motivo, fecha_gestion, latitud, longitud,
@@ -1058,7 +1105,7 @@ async function pushSync(req, res) {
         synced.gestiones.push(g.id);
         procesados++;
       } catch (err) {
-        errores.push({ tipo: 'gestion', id: g.id, message: err.message });
+        pushErr(errores, 'gestion', g.id, err.message);
       }
     }
 
@@ -1138,12 +1185,14 @@ async function pushSync(req, res) {
           [cobId, fechaCierre]
         );
         if (dupDia.length) {
-          errores.push({
-            tipo: 'cierre_caja',
-            id: cc.id,
-            message: `Ya existe un cierre de caja registrado para ${fechaCierre}.`,
-            cierre_existente: dupDia[0],
-          });
+          pushErr(
+            errores,
+            'cierre_caja',
+            cc.id,
+            `Ya existe un cierre de caja registrado para ${fechaCierre}.`,
+            'cierre_duplicado',
+            { cierre_existente: dupDia[0], fecha_cierre: fechaCierre }
+          );
           continue;
         }
         await conn.execute(
@@ -1163,7 +1212,7 @@ async function pushSync(req, res) {
         synced.cierres.push(cc.id);
         procesados++;
       } catch (err) {
-        errores.push({ tipo: 'cierre_caja', id: cc.id, message: err.message });
+        pushErr(errores, 'cierre_caja', cc.id, err.message);
       }
     }
 
@@ -1242,8 +1291,10 @@ async function pushSync(req, res) {
       });
     }
 
+    const partial = errores.length > 0 && procesados > 0;
     return res.json({
       success: errores.length === 0,
+      partial,
       procesados,
       idMapClientes,
       idMapFiadores: Object.keys(idMapFiadores).length ? idMapFiadores : undefined,
@@ -1251,7 +1302,11 @@ async function pushSync(req, res) {
       fiadorIdPorPrestamo: Object.keys(fiadorIdPorPrestamo).length ? fiadorIdPorPrestamo : undefined,
       synced,
       errores: errores.length ? errores : undefined,
-      message: errores.length ? errores[0].message : undefined,
+      message: partial
+        ? `${procesados} registro(s) guardados; ${errores.length} con error (revisar errores).`
+        : errores.length
+          ? errores[0].message
+          : undefined,
     });
   } catch (e) {
     await conn.rollback();

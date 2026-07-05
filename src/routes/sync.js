@@ -81,6 +81,7 @@ async function pullChanges(req, res) {
 }
 
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
+const { rangoDiaLocal } = require('../utils/fechasSql');
 
 async function pushGestiones(req, res) {
   const { gestiones } = req.body;
@@ -98,23 +99,45 @@ async function pushGestiones(req, res) {
     return responderErrorUsuario(res, e);
   }
 
-  const ids = gestiones.map((g) => g.id).filter(Boolean);
-  const ph = ids.map(() => '?').join(',');
-  const existentes = ids.length
-    ? await query(`SELECT id FROM Gestiones_No_Pago WHERE id IN (${ph})`, ids)
-    : [];
-  const existSet = new Set(existentes.map((r) => r.id));
-  const nuevas = gestiones.filter((g) => g.id && !existSet.has(g.id));
+  const omitidos = [];
+  let procesados = 0;
 
-  for (const g of nuevas) {
+  for (const g of gestiones) {
+    if (!g?.id) continue;
+    const [ex] = await query('SELECT id FROM Gestiones_No_Pago WHERE id = ?', [g.id]);
+    if (ex?.length) {
+      omitidos.push({ id: g.id, code: 'gestion_ya_existe' });
+      continue;
+    }
+    if (g.prestamo_id) {
+      const { inicio, fin } = rangoDiaLocal(g.fecha_gestion || new Date());
+      const [dup] = await query(
+        `SELECT id FROM Gestiones_No_Pago
+         WHERE prestamo_id = ? AND deleted_at IS NULL
+           AND fecha_gestion >= ? AND fecha_gestion < ?
+         LIMIT 1`,
+        [g.prestamo_id, inicio, fin]
+      );
+      if (dup?.length) {
+        omitidos.push({ id: g.id, code: 'gestion_ya_registrada', gestion_existente_id: dup[0].id });
+        continue;
+      }
+    }
     await query(
       `INSERT INTO Gestiones_No_Pago (id, prestamo_id, cobrador_id, motivo, fecha_gestion, latitud, longitud, is_synced)
        VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
       [g.id, g.prestamo_id, g.cobrador_id, g.motivo, g.fecha_gestion, g.latitud, g.longitud]
     );
+    procesados += 1;
   }
 
-  return res.json({ success: true, procesados: nuevas.length });
+  const partial = omitidos.length > 0 && procesados > 0;
+  return res.json({
+    success: omitidos.length === 0,
+    partial,
+    procesados,
+    omitidos: omitidos.length ? omitidos : undefined,
+  });
 }
 
 async function healthCheck(req, res) {

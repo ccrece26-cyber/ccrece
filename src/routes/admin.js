@@ -883,11 +883,15 @@ async function listPagosDelDia(req, res) {
     const { inicio, fin } = rangoDiaLocal(fecha);
     const cobrador_id = req.query.cobrador_id || null;
     let sql = `
-      SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
+      SELECT pg.id, pg.prestamo_id,
+             pg.cobrador_id AS cobro_registrado_por_id,
+             pg.monto_pagado, pg.fecha_pago,
              pg.latitud, pg.longitud, pg.updated_at, pg.editado_por_admin_at,
              pg.registrado_por_admin, pg.operador_id,
-             c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono, c.cobrador_id AS cliente_cobrador_id,
-             COALESCE(u.nombre_completo, uc.nombre_completo) AS cobrador_nombre,
+             c.id AS cliente_id, c.cobrador_id AS cobrador_id, c.cobrador_id AS cliente_cobrador_id,
+             c.nombre_completo, c.cedula, c.telefono,
+             uc.nombre_completo AS cobrador_nombre,
+             u.nombre_completo AS cobro_registrado_por_nombre,
              p.saldo_pendiente, p.estado AS estado_prestamo,
              p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro
       FROM Pagos pg
@@ -899,7 +903,7 @@ async function listPagosDelDia(req, res) {
     `;
     const params = [inicio, fin];
     if (cobrador_id) {
-      sql += ' AND (pg.cobrador_id = ? OR pg.operador_id = ? OR c.cobrador_id = ?)';
+      sql += ' AND (c.cobrador_id = ? OR pg.cobrador_id = ? OR pg.operador_id = ?)';
       params.push(cobrador_id, cobrador_id, cobrador_id);
     }
     sql += ' ORDER BY pg.fecha_pago DESC, c.nombre_completo ASC';
@@ -951,20 +955,25 @@ async function listPagosDetalle(req, res) {
     const cobrador_id = req.query.cobrador_id || null;
 
     let sqlPagos = `
-      SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
+      SELECT pg.id, pg.prestamo_id,
+             pg.cobrador_id AS cobro_registrado_por_id,
+             c.cobrador_id AS cobrador_id,
+             pg.monto_pagado, pg.fecha_pago,
              c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono,
-             u.nombre_completo AS cobrador_nombre,
+             uc.nombre_completo AS cobrador_nombre,
+             u.nombre_completo AS cobro_registrado_por_nombre,
              p.saldo_pendiente, p.cuota_semanal_base, p.estado AS estado_prestamo
       FROM Pagos pg
       INNER JOIN Prestamos p ON pg.prestamo_id = p.id AND p.deleted_at IS NULL
       INNER JOIN Clientes c ON p.cliente_id = c.id AND c.deleted_at IS NULL
       LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
+      LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id
       WHERE pg.deleted_at IS NULL AND DATE(pg.fecha_pago) BETWEEN DATE(?) AND DATE(?)
     `;
     const paramsPagos = [desde, hasta];
     if (cobrador_id) {
-      sqlPagos += ' AND pg.cobrador_id = ?';
-      paramsPagos.push(cobrador_id);
+      sqlPagos += ' AND (c.cobrador_id = ? OR pg.cobrador_id = ? OR pg.operador_id = ?)';
+      paramsPagos.push(cobrador_id, cobrador_id, cobrador_id);
     }
     sqlPagos += ' ORDER BY c.nombre_completo ASC, pg.fecha_pago ASC';
     const pagos = await query(sqlPagos, paramsPagos);

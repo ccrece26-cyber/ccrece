@@ -1721,10 +1721,11 @@ async function pagosPorFecha(req, res) {
        INNER JOIN Prestamos p ON pg.prestamo_id = p.id
        INNER JOIN Clientes c ON p.cliente_id = c.id
        LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
-       WHERE pg.deleted_at IS NULL AND pg.cobrador_id = ?
+       WHERE pg.deleted_at IS NULL
+         AND (pg.cobrador_id = ? OR pg.operador_id = ?)
          AND pg.fecha_pago >= ? AND pg.fecha_pago < ?
        ORDER BY pg.fecha_pago DESC`,
-      [cobradorId, inicio, fin]
+      [cobradorId, cobradorId, inicio, fin]
     );
     return res.json({ success: true, data: rows, fecha });
   } catch (e) {

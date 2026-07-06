@@ -1453,6 +1453,7 @@ async function cargarAgendaGestionadaHoy(cobradorId) {
         : porAdmin
           ? 'Cobrado por administrador'
           : 'Cobro registrado',
+      fecha_evento: pg.fecha_pago,
       pago_hoy_id: pg.id,
     });
   }
@@ -1488,6 +1489,7 @@ async function cargarAgendaGestionadaHoy(cobradorId) {
       tipo_visita: 'activo',
       estado_visita: 'no_pago',
       etiqueta_visita: g.motivo,
+      fecha_evento: g.fecha_gestion,
     });
   }
 

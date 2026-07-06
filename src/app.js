@@ -21,7 +21,7 @@ app.get('/', (req, res) => {
   res.json({
     service: 'apiCrediCrece',
     health: '/api/health',
-    docs: 'https://github.com/delveraz/apiCrediCrece',
+    docs: 'https://github.com/ccrece26-cyber/ccrece',
   });
 });
 

@@ -135,10 +135,6 @@ async function registrarPagoEnNube(conn, opts) {
 
   const pagoId = uuidv4();
   const fecha = new Date().toISOString();
-  const nuevoSaldo = esLiquidacion
-    ? 0
-    : Math.max(0, Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2)));
-  const estadoPrestamo = esLiquidacion || nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
 
   await conn.execute(
     `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
@@ -147,40 +143,12 @@ async function registrarPagoEnNube(conn, opts) {
     [pagoId, prestamoId, cobradorRegistro, montoEfectivo, fecha, latitud, longitud, operadorId]
   );
 
-  if (esLiquidacion) {
-    await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
-    await conn.execute(
-      `UPDATE Prestamos SET saldo_pendiente = 0,
-        monto_total_pagar = ?,
-        estado = 'Pagado', updated_at = NOW(), is_synced = 1
-       WHERE id = ?`,
-      [
-        Number(
-          (
-            Number(prestamo.monto_total_pagar) -
-            Number(prestamo.saldo_pendiente) +
-            montoEfectivo
-          ).toFixed(2)
-        ),
-        prestamoId,
-      ]
-    );
-    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
-  } else {
-    await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
-    const nuevoSaldo = Math.max(
-      0,
-      Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2))
-    );
-    const estadoPrestamo = nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
-    await conn.execute(
-      `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-      [nuevoSaldo, estadoPrestamo, prestamoId]
-    );
-    if (estadoPrestamo === 'Pagado') {
-      await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
-    }
-  }
+  await aplicarMontoACuotas(conn, prestamoId, montoEfectivo, fecha);
+  const nuevoSaldo = await actualizarPrestamoTrasCobro(conn, prestamoId, {
+    esLiquidacion,
+    prestamo,
+    montoEfectivo,
+  });
 
   return {
     pagoId,
@@ -250,6 +218,69 @@ async function recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId) {
   return saldo;
 }
 
+const TOLERANCIA_LIQUIDACION_PUSH = 2.5;
+
+/** Detecta liquidación en sync push (flag explícito o monto ≈ liquidación en nube). */
+function resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado) {
+  const fechaRef = new Date(p.fecha_pago || new Date());
+  const liq = calcularLiquidacionAnticipada(prestamo, fechaRef, { pagadoAcumulado });
+  const montoCliente = Number(p.monto_pagado);
+  const flagExplicito =
+    p.tipo_cobro === 'liquidacion' ||
+    p.tipo === 'liquidacion' ||
+    Number(p.es_liquidacion) === 1 ||
+    p.es_liquidacion === true;
+
+  const saldoNube = Number(prestamo.saldo_pendiente || 0);
+  const porMonto =
+    montoCliente > 0.01 &&
+    (Math.abs(montoCliente - liq.montoLiquidacion) <= TOLERANCIA_LIQUIDACION_PUSH ||
+      (liq.vencido && montoCliente >= saldoNube - 0.02));
+
+  const esLiquidacion = flagExplicito || porMonto;
+  let montoEfectivo = montoCliente;
+  if (esLiquidacion && Number(liq.montoLiquidacion) > 0.01) {
+    montoEfectivo = Number(liq.montoLiquidacion);
+  }
+  return { esLiquidacion, montoEfectivo, liq };
+}
+
+/** Fuente única de verdad tras cobro: calendario de cuotas (evita descuadres por resta manual). */
+async function actualizarPrestamoTrasCobro(conn, prestamoId, opts = {}) {
+  const { esLiquidacion = false, prestamo = null, montoEfectivo = 0 } = opts;
+
+  if (esLiquidacion && prestamo) {
+    await conn.execute(
+      `UPDATE Prestamos SET saldo_pendiente = 0,
+        monto_total_pagar = ?,
+        estado = 'Pagado', updated_at = NOW(), is_synced = 1
+       WHERE id = ?`,
+      [
+        Number(
+          (
+            Number(prestamo.monto_total_pagar) -
+            Number(prestamo.saldo_pendiente) +
+            Number(montoEfectivo)
+          ).toFixed(2)
+        ),
+        prestamoId,
+      ]
+    );
+    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
+    return 0;
+  }
+
+  const saldo = await recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
+  const [estRow] = await conn.execute(
+    `SELECT estado FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [prestamoId]
+  );
+  if (estRow[0]?.estado === 'Pagado') {
+    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
+  }
+  return saldo;
+}
+
 module.exports = {
   registrarPagoEnNube,
   registrarGestionNoPagoEnNube,
@@ -257,4 +288,7 @@ module.exports = {
   revertirMontoDeCuotas,
   redistribuirCuotasDesdePagos,
   recalcularSaldoPrestamoDesdeCuotas,
+  actualizarPrestamoTrasCobro,
+  resolverLiquidacionEnPush,
+  TOLERANCIA_LIQUIDACION_PUSH,
 };

@@ -18,7 +18,7 @@ const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = requi
 const { hoyISO } = require('../utils/zonaHoraria');
 const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
-const { aplicarMontoACuotas } = require('../utils/registrarPagoNube');
+const { aplicarMontoACuotas, actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../utils/registrarPagoNube');
 const { capMontoAlSaldo } = require('../utils/cobroMontos');
 const { sincronizarCuotasTrasCierrePagado } = require('../utils/cuotasCalendario');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
@@ -150,11 +150,12 @@ async function rutaDiaria(req, res) {
         `SELECT g.*, p.cliente_id
          FROM Gestiones_No_Pago g
          INNER JOIN Prestamos p ON g.prestamo_id = p.id
-         WHERE g.cobrador_id = ?
-           AND g.fecha_gestion >= ? AND g.fecha_gestion < ?
+         INNER JOIN Clientes c ON p.cliente_id = c.id
+         WHERE g.fecha_gestion >= ? AND g.fecha_gestion < ?
            AND g.deleted_at IS NULL
+           AND (g.cobrador_id = ? OR g.operador_id = ? OR c.cobrador_id = ?)
            AND p.cliente_id IN (${ph2})`,
-        [cobradorId, diaIni, diaFin, ...clienteIds]
+        [diaIni, diaFin, cobradorId, cobradorId, cobradorId, ...clienteIds]
       );
     }
 
@@ -263,6 +264,18 @@ async function rutaDiaria(req, res) {
       if (a.tipo_visita === 'activo' && b.tipo_visita === 'liquidado') return 1;
       return String(a.prestamo_id).localeCompare(String(b.prestamo_id));
     });
+
+    for (const item of agenda) {
+      const cobrado = item.estado_visita === 'cobrado' || item.estado_visita === 'cobrado_admin';
+      const saldoCero = Number(item.saldo_pendiente ?? 1) <= 0.01;
+      const pagado = item.estado_prestamo === 'Pagado';
+      if (cobrado && (pagado || saldoCero)) {
+        item.tipo_visita = 'liquidado';
+        if (!item.etiqueta_visita || item.etiqueta_visita === 'Cobro registrado') {
+          item.etiqueta_visita = 'Liquidación';
+        }
+      }
+    }
 
     let pagos_anulados_hoy = [];
     if (clienteIds.length) {
@@ -952,22 +965,14 @@ async function pushSync(req, res) {
             procesados++;
             continue;
           }
-          errores.push({
-            tipo: 'pago',
-            id: p.id,
-            code: 'cobro_ya_registrado',
-            message:
-              Number(existente.registrado_por_admin) === 1
-                ? 'Este credito ya fue cobrado hoy por el administrador.'
-                : 'Este credito ya tiene un cobro registrado hoy.',
-            prestamo_id: prestamoIdPago,
-            pago_existente_id: existente.id,
-          });
+          // Idempotencia: un cobro por día y préstamo — el local ya está en nube con otro id.
+          synced.pagos.push(p.id);
+          procesados++;
           continue;
         }
 
-        const montoEfectivo = Number(p.monto_pagado);
-        if (montoEfectivo <= 0) throw new Error('Monto invalido');
+        const montoEfectivoRaw = Number(p.monto_pagado);
+        if (montoEfectivoRaw <= 0) throw new Error('Monto invalido');
 
         const [pagadoRows] = await conn.execute(
           `SELECT COALESCE(SUM(monto_pagado), 0) AS total FROM Pagos
@@ -975,10 +980,7 @@ async function pushSync(req, res) {
           [prestamoIdPago]
         );
         const pagadoAcumulado = Number(pagadoRows[0]?.total || 0);
-        const liq = calcularLiquidacionAnticipada(prestamo, new Date(p.fecha_pago || new Date()), {
-          pagadoAcumulado,
-        });
-        const esLiquidacion = Math.abs(montoEfectivo - liq.montoLiquidacion) < 0.02;
+        const { esLiquidacion, montoEfectivo } = resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado);
 
         if (!esLiquidacion && montoEfectivo > Number(prestamo.saldo_pendiente) + 0.01) {
           errores.push({
@@ -1009,40 +1011,12 @@ async function pushSync(req, res) {
           ]
         );
 
-        if (esLiquidacion) {
-          await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
-          await conn.execute(
-            `UPDATE Prestamos SET saldo_pendiente = 0,
-              monto_total_pagar = ?,
-              estado = 'Pagado', updated_at = NOW(), is_synced = 1
-             WHERE id = ?`,
-            [
-              Number(
-                (
-                  Number(prestamo.monto_total_pagar) -
-                  Number(prestamo.saldo_pendiente) +
-                  montoEfectivo
-                ).toFixed(2)
-              ),
-              prestamoIdPago,
-            ]
-          );
-          await sincronizarCuotasTrasCierrePagado(conn, prestamoIdPago);
-        } else {
-          await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
-          const nuevoSaldo = Math.max(
-            0,
-            Number((Number(prestamo.saldo_pendiente) - montoEfectivo).toFixed(2))
-          );
-          const estadoPrestamo = nuevoSaldo <= 0 ? 'Pagado' : 'Activo';
-          await conn.execute(
-            `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-            [nuevoSaldo, estadoPrestamo, prestamoIdPago]
-          );
-          if (estadoPrestamo === 'Pagado') {
-            await sincronizarCuotasTrasCierrePagado(conn, prestamoIdPago);
-          }
-        }
+        await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
+        await actualizarPrestamoTrasCobro(conn, prestamoIdPago, {
+          esLiquidacion,
+          prestamo,
+          montoEfectivo,
+        });
 
         synced.pagos.push(p.id);
         if (!Number(p.registrado_por_admin)) {
@@ -1371,7 +1345,7 @@ async function cargarCorreccionesAdmin(cobradorId, desde) {
   return { pagos, prestamos, cuotas };
 }
 
-/** IDs de pagos activos/anulados hoy — para reconciliar SQLite del cobrador sin descargar ruta completa. */
+/** Pagos y gestiones de hoy — reconciliar SQLite del cobrador sin descargar ruta completa. */
 async function cargarSnapshotPagosHoy(cobradorId) {
   const hoy = hoyISO();
   const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
@@ -1399,7 +1373,147 @@ async function cargarSnapshotPagosHoy(cobradorId) {
     [diaIni, diaFin, cobradorId, cobradorId]
   );
 
-  return { pagos_hoy, pagos_anulados_hoy };
+  const gestiones_hoy = await query(
+    `SELECT g.id, g.prestamo_id, g.cobrador_id, g.motivo, g.fecha_gestion, g.operador_id
+     FROM Gestiones_No_Pago g
+     INNER JOIN Prestamos p ON g.prestamo_id = p.id
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     WHERE g.fecha_gestion >= ? AND g.fecha_gestion < ?
+       AND g.deleted_at IS NULL
+       AND (g.cobrador_id = ? OR c.cobrador_id = ?)`,
+    [diaIni, diaFin, cobradorId, cobradorId]
+  );
+
+  return { pagos_hoy, pagos_anulados_hoy, gestiones_hoy };
+}
+
+/** Visitas ya gestionadas hoy (cobro, liquidación, no pago) — consulta liviana para sync. */
+async function cargarAgendaGestionadaHoy(cobradorId) {
+  const hoy = fechaCalendarioISO();
+  const hoyDia = diaCobroHoy();
+  const { pagos_hoy, gestiones_hoy } = await cargarSnapshotPagosHoy(cobradorId);
+  const agenda = [];
+  const vistos = new Set();
+
+  const prestamoIds = [
+    ...new Set(
+      [...pagos_hoy.map((p) => p.prestamo_id), ...gestiones_hoy.map((g) => g.prestamo_id)].filter(Boolean)
+    ),
+  ];
+  if (!prestamoIds.length) {
+    return { agenda, pagos_hoy, gestiones_hoy, prestamos_gestionados: [], dia_cobro: hoyDia, fecha: hoy };
+  }
+
+  const ph = prestamoIds.map(() => '?').join(',');
+  const prestamos = await query(
+    `SELECT p.*, c.nombre_completo, c.telefono, c.direccion, c.cedula, c.latitud, c.longitud,
+            COALESCE(rc.orden_visita, 999) AS orden_visita
+     FROM Prestamos p
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     LEFT JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
+     LEFT JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1
+     WHERE p.id IN (${ph}) AND p.deleted_at IS NULL`,
+    [cobradorId, ...prestamoIds]
+  );
+  const prestamoPorId = new Map(prestamos.map((p) => [p.id, p]));
+
+  for (const pg of pagos_hoy) {
+    const p = prestamoPorId.get(pg.prestamo_id);
+    if (!p || vistos.has(pg.prestamo_id)) continue;
+    vistos.add(pg.prestamo_id);
+    const esLiquidacion = p.estado === 'Pagado' || Number(p.saldo_pendiente || 0) <= 0;
+    const porAdmin = Number(pg.registrado_por_admin) === 1;
+    agenda.push({
+      cuota_id: `pago-${pg.id}`,
+      prestamo_id: p.id,
+      cliente_id: p.cliente_id,
+      nombre_completo: p.nombre_completo,
+      telefono: p.telefono,
+      direccion: p.direccion,
+      cedula: p.cedula,
+      latitud: p.latitud,
+      longitud: p.longitud,
+      orden_visita: p.orden_visita,
+      monto_programado: Number(pg.monto_pagado),
+      monto_pagado: Number(pg.monto_pagado),
+      fecha_programada: hoy,
+      estado_cuota: 'Pagada',
+      saldo_pendiente: p.saldo_pendiente,
+      cuota_semanal_base: p.cuota_semanal_base,
+      dias_de_cobro: p.dias_de_cobro,
+      monto_total_pagar: p.monto_total_pagar,
+      estado_prestamo: p.estado,
+      fecha_desembolso: p.fecha_desembolso,
+      plazo_semanas: p.plazo_semanas,
+      dia_cobro: hoyDia,
+      tipo_visita: esLiquidacion ? 'liquidado' : 'cobrado',
+      estado_visita: porAdmin ? 'cobrado_admin' : 'cobrado',
+      etiqueta_visita: esLiquidacion
+        ? 'Liquidación'
+        : porAdmin
+          ? 'Cobrado por administrador'
+          : 'Cobro registrado',
+      pago_hoy_id: pg.id,
+    });
+  }
+
+  for (const g of gestiones_hoy) {
+    if (vistos.has(g.prestamo_id)) continue;
+    const p = prestamoPorId.get(g.prestamo_id);
+    if (!p) continue;
+    vistos.add(g.prestamo_id);
+    agenda.push({
+      cuota_id: `gestion-${g.id}`,
+      prestamo_id: p.id,
+      cliente_id: p.cliente_id,
+      nombre_completo: p.nombre_completo,
+      telefono: p.telefono,
+      direccion: p.direccion,
+      cedula: p.cedula,
+      latitud: p.latitud,
+      longitud: p.longitud,
+      orden_visita: p.orden_visita,
+      monto_programado: 0,
+      monto_pagado: 0,
+      fecha_programada: hoy,
+      estado_cuota: 'Programada',
+      saldo_pendiente: p.saldo_pendiente,
+      cuota_semanal_base: p.cuota_semanal_base,
+      dias_de_cobro: p.dias_de_cobro,
+      monto_total_pagar: p.monto_total_pagar,
+      estado_prestamo: p.estado,
+      fecha_desembolso: p.fecha_desembolso,
+      plazo_semanas: p.plazo_semanas,
+      dia_cobro: hoyDia,
+      tipo_visita: 'activo',
+      estado_visita: 'no_pago',
+      etiqueta_visita: g.motivo,
+    });
+  }
+
+  for (const item of agenda) {
+    const cobrado = item.estado_visita === 'cobrado' || item.estado_visita === 'cobrado_admin';
+    const saldoCero = Number(item.saldo_pendiente ?? 1) <= 0.01;
+    const pagado = item.estado_prestamo === 'Pagado';
+    if (cobrado && (pagado || saldoCero)) {
+      item.tipo_visita = 'liquidado';
+      if (!item.etiqueta_visita || item.etiqueta_visita === 'Cobro registrado') {
+        item.etiqueta_visita = 'Liquidación';
+      }
+    }
+  }
+
+  agenda.sort((a, b) => (a.orden_visita ?? 999) - (b.orden_visita ?? 999));
+
+  return {
+    agenda,
+    agenda_gestionada_hoy: agenda,
+    pagos_hoy,
+    gestiones_hoy,
+    prestamos_gestionados: prestamos.filter((p) => vistos.has(p.id)),
+    dia_cobro: hoyDia,
+    fecha: hoy,
+  };
 }
 
 async function getCorreccionesAdmin(req, res) {
@@ -1453,12 +1567,14 @@ async function syncAviso(req, res) {
     if (aplicar && n > 0) {
       const payload = await cargarCorreccionesAdmin(cobradorId, desde);
       const snapshot = await cargarSnapshotPagosHoy(cobradorId);
-      return res.json({ ...base, ...payload, ...snapshot });
+      const gestionada = await cargarAgendaGestionadaHoy(cobradorId);
+      return res.json({ ...base, ...payload, ...snapshot, ...gestionada });
     }
 
     if (aplicar) {
       const snapshot = await cargarSnapshotPagosHoy(cobradorId);
-      return res.json({ ...base, ...snapshot });
+      const gestionada = await cargarAgendaGestionadaHoy(cobradorId);
+      return res.json({ ...base, ...snapshot, ...gestionada });
     }
 
     return res.json(base);

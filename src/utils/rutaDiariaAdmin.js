@@ -218,6 +218,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
         fecha_programada: cuotaPend?.fecha_programada || hoy,
         estado_cuota: cuotaPend?.estado || extra.estado_cuota || 'Programada',
         cliente_id: c.id,
+        codigo_cliente: c.id,
         nombre_completo: c.nombre_completo,
         telefono: c.telefono,
         direccion: c.direccion,

@@ -1189,16 +1189,7 @@ async function updatePago(req, res) {
       } else {
         await revertirMontoDeCuotas(conn, pago.prestamo_id, Math.abs(diff));
       }
-      await conn.execute(
-        `UPDATE Prestamos SET saldo_pendiente = GREATEST(0, saldo_pendiente - ?), updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-        [diff, pago.prestamo_id]
-      );
-      const [prest] = await conn.execute('SELECT saldo_pendiente FROM Prestamos WHERE id = ?', [pago.prestamo_id]);
-      if (prest[0] && Number(prest[0].saldo_pendiente) <= 0) {
-        await conn.execute(`UPDATE Prestamos SET estado = 'Pagado', updated_at = NOW() WHERE id = ?`, [pago.prestamo_id]);
-      } else {
-        await conn.execute(`UPDATE Prestamos SET estado = 'Activo', updated_at = NOW() WHERE id = ?`, [pago.prestamo_id]);
-      }
+      await recalcularSaldoPrestamoDesdeCuotas(conn, pago.prestamo_id);
     }
 
     await conn.execute(

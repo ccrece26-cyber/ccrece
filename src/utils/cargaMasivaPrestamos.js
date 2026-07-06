@@ -3,7 +3,7 @@ const { nombreCompleto } = require('./cliente');
 const { normalizarCedula, validarCedula } = require('./cedulaNic');
 const { reserveClienteIds, initSecuenciaCliente } = require('./clienteId');
 const { insertMany, updateManyById } = require('./bulkSql');
-const { aplicarMontoACuotas } = require('./registrarPagoNube');
+const { aplicarMontoACuotas, recalcularSaldoPrestamoDesdeCuotas } = require('./registrarPagoNube');
 const {
   normalizarAbonoCuota,
   absorberResiduosCuotasEnMemoria,
@@ -367,7 +367,20 @@ function aplicarMontoACuotasInMemoria(cuotas, monto) {
   absorberResiduosCuotasEnMemoria(cuotas);
 }
 
+async function cuadrarPrestamoDesdeCalendario(conn, prestamoId) {
+  await conn.execute(
+    `UPDATE Prestamos SET monto_total_pagar = (
+       SELECT COALESCE(SUM(monto_programado), 0) FROM Cuotas_Calendario
+       WHERE prestamo_id = ? AND deleted_at IS NULL
+     ), updated_at = NOW(), is_synced = 1
+     WHERE id = ?`,
+    [prestamoId, prestamoId]
+  );
+  await recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
+}
+
 async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 1.5) {
+  await cuadrarPrestamoDesdeCalendario(conn, prestamoId);
   const [rows] = await conn.execute(
     `SELECT monto_total_pagar, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     [prestamoId]
@@ -432,17 +445,7 @@ async function aplicarPagoHistoricoImportacion(conn, item) {
      WHERE prestamo_id = ? AND deleted_at IS NULL`,
     [prestamoId]
   );
-  const total = Number(prestRows[0]?.monto_total_pagar || 0);
-  const sumPagos = Number(pagosRow[0]?.t || 0);
-  const nuevoSaldo = Math.max(0, Number((total - sumPagos).toFixed(2)));
-  const estado = nuevoSaldo <= 0.01 ? 'Pagado' : 'Activo';
-  if (estado === 'Pagado') {
-    await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
-  }
-  await conn.execute(
-    `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-    [estado === 'Pagado' ? 0 : nuevoSaldo, estado, prestamoId]
-  );
+  await recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
   await verificarCuadrePrestamo(conn, prestamoId);
 }
 
@@ -1021,6 +1024,9 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
   }
 
   const verificarIds = pendientesPago.map((p) => p.prestamo_id);
+  for (const pid of verificarIds) {
+    await cuadrarPrestamoDesdeCalendario(conn, pid);
+  }
   await verificarCuadrePrestamosBulk(conn, verificarIds);
 
   return { exitos, rutasOptimizar: new Set(exitos.map((e) => e.ruta_id)) };

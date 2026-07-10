@@ -40,7 +40,7 @@ const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos } = require('../utils/reporteVencidos');
 const { aplicarMontoACuotas, revertirMontoDeCuotas, recalcularSaldoPrestamoDesdeCuotas } = require('../utils/registrarPagoNube');
-const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix } = require('../utils/fechasSql');
+const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix, whereCierreCalendarioDia } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
 
@@ -1787,7 +1787,6 @@ async function getCumplimientoRuta(req, res) {
 async function reabrirCierreCajaDia(req, res) {
   try {
     const { fechaCalendarioISO } = require('../utils/diasCobro');
-    const { whereCierreCalendarioDia } = require('../utils/fechasSql');
     const cobradorId = req.body?.cobrador_id;
     const fecha = req.body?.fecha || fechaCalendarioISO();
     if (!cobradorId) {
@@ -1801,6 +1800,116 @@ async function reabrirCierreCajaDia(req, res) {
     return res.json({
       success: true,
       message: 'Dia reabierto. El cobrador puede volver a cerrar caja cuando termine.',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+function validarFechaCierreAdmin(fechaISO) {
+  const { fechaCalendarioISO } = require('../utils/diasCobro');
+  const hoy = fechaCalendarioISO();
+  const f = String(fechaISO || hoy).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(f)) {
+    return { ok: false, message: 'Fecha invalida.' };
+  }
+  if (f > hoy) return { ok: false, message: 'No puede cerrar caja de un dia futuro.' };
+  const limite = new Date(`${hoy}T12:00:00`);
+  limite.setDate(limite.getDate() - 30);
+  const limiteISO = limite.toISOString().slice(0, 10);
+  if (f < limiteISO) return { ok: false, message: 'Solo puede cerrar los ultimos 30 dias.' };
+  return { ok: true, fecha: f, hoy };
+}
+
+/** Admin: cerrar caja de un cobrador (hoy o dias anteriores olvidados). */
+async function cerrarCierreCajaDia(req, res) {
+  try {
+    const cobradorId = req.body?.cobrador_id;
+    if (!cobradorId) {
+      return res.status(400).json({ success: false, message: 'cobrador_id requerido' });
+    }
+
+    const val = validarFechaCierreAdmin(req.body?.fecha);
+    if (!val.ok) return res.status(400).json({ success: false, message: val.message });
+    const fecha = val.fecha;
+
+    const [cob] = await query(
+      `SELECT u.id, u.nombre_completo FROM Usuarios u
+       JOIN Roles r ON u.rol_id = r.id
+       WHERE u.id = ? AND r.nombre = 'COBRADOR'`,
+      [cobradorId]
+    );
+    if (!cob) {
+      return res.status(404).json({ success: false, message: 'Cobrador no encontrado' });
+    }
+
+    const existente = await query(
+      `SELECT id, fecha_cierre, monto_efectivo, transacciones
+       FROM Cierre_Caja
+       WHERE cobrador_id = ? AND deleted_at IS NULL
+         AND ${whereCierreCalendarioDia('fecha_cierre')}
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [cobradorId, fecha]
+    );
+    if (existente.length) {
+      return res.status(409).json({
+        success: false,
+        ya_cerrado: true,
+        message: `La caja de ${cob.nombre_completo} del ${fecha} ya esta cerrada.`,
+        cierre: existente[0],
+      });
+    }
+
+    const { inicio, fin } = rangoDiaLocal(fecha);
+    const [tot] = await query(
+      `SELECT COUNT(id) AS transacciones, COALESCE(SUM(monto_pagado), 0) AS monto_total
+       FROM Pagos
+       WHERE deleted_at IS NULL AND (cobrador_id = ? OR operador_id = ?)
+         AND fecha_pago >= ? AND fecha_pago < ?`,
+      [cobradorId, cobradorId, inicio, fin]
+    );
+
+    const montoCalc = Number(tot?.monto_total || 0);
+    const transCalc = Number(tot?.transacciones || 0);
+    const monto =
+      req.body?.monto_efectivo != null && req.body.monto_efectivo !== ''
+        ? Number(req.body.monto_efectivo)
+        : montoCalc;
+    const transacciones =
+      req.body?.transacciones != null && req.body.transacciones !== ''
+        ? Number(req.body.transacciones)
+        : transCalc;
+
+    if (!Number.isFinite(monto) || monto < 0) {
+      return res.status(400).json({ success: false, message: 'Monto de cierre invalido.' });
+    }
+    if (!Number.isFinite(transacciones) || transacciones < 0) {
+      return res.status(400).json({ success: false, message: 'Transacciones invalidas.' });
+    }
+
+    const id = req.body?.id || uuidv4();
+    const obs =
+      req.body?.observaciones ||
+      `Cierre registrado por administrador (${fecha}${fecha === val.hoy ? '' : ', dia anterior'}).`;
+
+    await query(
+      `INSERT INTO Cierre_Caja (id, cobrador_id, fecha_cierre, monto_efectivo, transacciones, observaciones, latitud, longitud, is_synced)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1)`,
+      [id, cobradorId, fecha, monto, transacciones, obs]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: `Caja de ${cob.nombre_completo} cerrada para el ${fecha}.`,
+      cierre: {
+        id,
+        cobrador_id: cobradorId,
+        fecha_cierre: fecha,
+        monto_efectivo: monto,
+        transacciones,
+        observaciones: obs,
+      },
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -2104,6 +2213,7 @@ module.exports = {
   seedDemoEsteli,
   getCumplimientoRuta,
   reabrirCierreCajaDia,
+  cerrarCierreCajaDia,
   validarCargaMasiva,
   importarCargaMasiva,
   validarCargaMasivaGarantias,

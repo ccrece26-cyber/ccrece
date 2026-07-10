@@ -41,6 +41,7 @@ app.get('/api/auth/push-token/estado', estadoPushToken);
 
 app.get('/api/admin/cumplimiento-ruta', admin.getCumplimientoRuta);
 app.post('/api/admin/cierre-caja/reabrir', admin.reabrirCierreCajaDia);
+app.post('/api/admin/cierre-caja/cerrar', admin.cerrarCierreCajaDia);
 app.get('/api/admin/kpis', admin.getKpis);
 app.get('/api/admin/respaldo-sql', admin.getRespaldoSql);
 app.get('/api/admin/reportes/:tipo', admin.getReporte);

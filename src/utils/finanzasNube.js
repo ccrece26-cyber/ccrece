@@ -96,6 +96,15 @@ const generarAgendaDeCobro = (fechaInicioISO, plazoSemanas, diasDeCobro = ['LUNE
   return agenda.sort((a, b) => a.fecha_programada.localeCompare(b.fecha_programada));
 };
 
+/** Pagado acumulado fiable: max(suma pagos, total - saldo). */
+const pagadoAcumuladoParaLiquidacion = (prestamo, sumPagos = null) => {
+  const total = numSeguro(prestamo?.monto_total_pagar, numSeguro(prestamo?.monto_desembolsado));
+  const saldo = numSeguro(prestamo?.saldo_pendiente);
+  const porSaldo = Math.max(0, Number((total - saldo).toFixed(2)));
+  if (sumPagos == null || !Number.isFinite(Number(sumPagos))) return porSaldo;
+  const porSuma = Math.max(0, Number(Number(sumPagos).toFixed(2)));
+  return Math.max(porSuma, porSaldo);
+};
 /** Ajusta la agenda para que suma(monto_programado) === montoTotalPagar (redondeo / visitas de más). */
 function ajustarAgendaAlMontoTotal(agenda, montoTotalPagar) {
   if (!Array.isArray(agenda) || !agenda.length) return agenda;
@@ -189,10 +198,10 @@ const calcularLiquidacionAnticipada = (prestamo, refDate = new Date(), opts = {}
   const tasaGlobal = numSeguro(prestamo.tasa_interes_aplicada);
   const saldo = numSeguro(prestamo.saldo_pendiente);
   const totalOriginal = numSeguro(prestamo.monto_total_pagar, capital);
-  const pagadoAcumulado =
-    opts.pagadoAcumulado != null
-      ? numSeguro(opts.pagadoAcumulado)
-      : Number((totalOriginal - saldo).toFixed(2));
+  const pagadoAcumulado = pagadoAcumuladoParaLiquidacion(
+    prestamo,
+    opts.pagadoAcumulado != null ? opts.pagadoAcumulado : null
+  );
   const saldoContrato = Math.max(0, Number((totalOriginal - pagadoAcumulado).toFixed(2)));
   const tasaMensual = tasaGlobal / (plazo / SEMANAS_POR_MES);
   const interesOriginal = Number((capital * tasaGlobal).toFixed(2));
@@ -253,6 +262,7 @@ const calcularLiquidacionAnticipada = (prestamo, refDate = new Date(), opts = {}
 };
 
 module.exports = {
+  pagadoAcumuladoParaLiquidacion,
   TASA_MENSUAL_DEFAULT,
   SEMANAS_POR_MES,
   parseTasaMensualInput,

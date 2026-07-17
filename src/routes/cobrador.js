@@ -15,7 +15,7 @@ const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } =
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
 const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = require('../utils/fechasSql');
-const { hoyISO } = require('../utils/zonaHoraria');
+const { hoyISO, toFechaISO } = require('../utils/zonaHoraria');
 const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { aplicarMontoACuotas, actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../utils/registrarPagoNube');
@@ -465,6 +465,7 @@ async function pushSync(req, res) {
     garantias: [],
     prestamo_garantias: [],
     pagos: [],
+    pagos_id_duplicados: [],
     gestiones: [],
     renovaciones: [],
     solicitudes_correccion: [],
@@ -965,14 +966,44 @@ async function pushSync(req, res) {
             procesados++;
             continue;
           }
-          // Idempotencia: un cobro por día y préstamo — el local ya está en nube con otro id.
           synced.pagos.push(p.id);
+          synced.pagos_id_duplicados = synced.pagos_id_duplicados || [];
+          synced.pagos_id_duplicados.push({
+            local_id: p.id,
+            nube_id: existente.id,
+            prestamo_id: prestamoIdPago,
+          });
           procesados++;
           continue;
         }
 
         const montoEfectivoRaw = Number(p.monto_pagado);
         if (montoEfectivoRaw <= 0) throw new Error('Monto invalido');
+
+        // Día con caja cerrada: el cobrador no puede subir cobros; solo admin (registrado_por_admin).
+        if (!Number(p.registrado_por_admin)) {
+          const diaPago = toFechaISO(p.fecha_pago || new Date());
+          const cobradorCierre = p.cobrador_id || cobradorId;
+          const [cierreRows] = await conn.execute(
+            `SELECT id FROM Cierre_Caja
+             WHERE cobrador_id = ? AND deleted_at IS NULL
+               AND ${whereCierreCalendarioDia('fecha_cierre')}
+             LIMIT 1`,
+            [cobradorCierre, diaPago]
+          );
+          if (cierreRows.length) {
+            errores.push({
+              tipo: 'pago',
+              id: p.id,
+              code: 'caja_cerrada',
+              prestamo_id: prestamoIdPago,
+              fecha: diaPago,
+              message:
+                'Caja ya cerrada ese día. Solo el administrador puede cobrar o debe reabrir el día.',
+            });
+            continue;
+          }
+        }
 
         const [pagadoRows] = await conn.execute(
           `SELECT COALESCE(SUM(monto_pagado), 0) AS total FROM Pagos
@@ -1058,6 +1089,28 @@ async function pushSync(req, res) {
               'Este credito ya tiene una gestion registrada hoy.',
               'gestion_ya_registrada',
               { prestamo_id: prestamoIdG, gestion_existente_id: gestHoy[0].id }
+            );
+            continue;
+          }
+        }
+        if (!Number(g.registrado_por_admin)) {
+          const diaGest = toFechaISO(g.fecha_gestion || new Date());
+          const cobradorCierre = g.cobrador_id || cobradorId;
+          const [cierreRows] = await conn.execute(
+            `SELECT id FROM Cierre_Caja
+             WHERE cobrador_id = ? AND deleted_at IS NULL
+               AND ${whereCierreCalendarioDia('fecha_cierre')}
+             LIMIT 1`,
+            [cobradorCierre, diaGest]
+          );
+          if (cierreRows.length) {
+            pushErr(
+              errores,
+              'gestion',
+              g.id,
+              'Caja ya cerrada ese día. Solo el administrador puede gestionar o debe reabrir el día.',
+              'caja_cerrada',
+              { prestamo_id: g.prestamo_id, fecha: diaGest }
             );
             continue;
           }

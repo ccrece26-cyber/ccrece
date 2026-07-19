@@ -1,6 +1,12 @@
 /** Misma lógica que app-financiera/src/utils/finanzas.js (motor nube / carga masiva) */
 
 const { toFechaISO } = require('./zonaHoraria');
+const {
+  resolverFrecuenciaCobro,
+  TIPO_DIAS_MES,
+  fechaDiaDelMes,
+  esListaDiasMes,
+} = require('./frecuenciaCobro');
 
 const SEMANAS_POR_MES = 4;
 const TASA_MENSUAL_DEFAULT = 0.1;
@@ -32,14 +38,28 @@ const calcularCuotaYDistribucion = (
   montoDesembolso,
   plazoSemanas,
   diasDeCobro = ['LUNES'],
-  tasaMensual = TASA_MENSUAL_DEFAULT
+  tasaMensual = TASA_MENSUAL_DEFAULT,
+  opts = {}
 ) => {
+  const freq = resolverFrecuenciaCobro({
+    tipo_frecuencia: opts.tipo_frecuencia || opts.periodicidad,
+    dias_de_cobro: diasDeCobro,
+    dias_mes: opts.dias_mes,
+  });
+  const diasAgenda = freq.diasParaAgenda;
   const tasaInteresAplicada = calcularTasaInteresVariableLineal(plazoSemanas, tasaMensual);
   const interesTotal = Number((montoDesembolso * tasaInteresAplicada).toFixed(2));
   const montoTotalPagar = Number((montoDesembolso + interesTotal).toFixed(2));
   const cuotaSemanalBase = Number((montoTotalPagar / plazoSemanas).toFixed(2));
-  const frecuenciaSemanal = diasDeCobro.length || 1;
-  const cuotaPorDiaDeCobro = Number((cuotaSemanalBase / frecuenciaSemanal).toFixed(2));
+  let frecuenciaSemanal = diasAgenda.length || 1;
+  let cuotaPorDiaDeCobro;
+  if (freq.tipo === TIPO_DIAS_MES) {
+    const visitasEst = Math.max(1, Math.round(calcularMesesFinancieros(plazoSemanas) * diasAgenda.length));
+    cuotaPorDiaDeCobro = Number((montoTotalPagar / visitasEst).toFixed(2));
+    frecuenciaSemanal = diasAgenda.length;
+  } else {
+    cuotaPorDiaDeCobro = Number((cuotaSemanalBase / frecuenciaSemanal).toFixed(2));
+  }
   return {
     montoDesembolso,
     plazoSemanas,
@@ -50,7 +70,10 @@ const calcularCuotaYDistribucion = (
     cuotaSemanalBase,
     cuotaPorDiaDeCobro,
     frecuenciaSemanal,
-    diasDeCobro,
+    diasDeCobro: diasAgenda,
+    tipo_frecuencia: freq.tipo,
+    periodicidad: freq.periodicidad,
+    dias_mes: freq.diasMes,
   };
 };
 
@@ -59,18 +82,16 @@ const diaSemanaIndice = (nombreDia) => {
   return DIAS_SEMANA[key] ?? DIAS_SEMANA.LUNES;
 };
 
-const generarAgendaDeCobro = (fechaInicioISO, plazoSemanas, diasDeCobro = ['LUNES'], cuotaPorDia = 0) => {
+const fechaAISO = (fecha) => {
+  if (!(fecha instanceof Date) || Number.isNaN(fecha.getTime())) return null;
+  const y = fecha.getFullYear();
+  const m = String(fecha.getMonth() + 1).padStart(2, '0');
+  const day = String(fecha.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const generarAgendaSemanal = (inicioStr, inicio, plazo, dias, cuotaPorDia) => {
   const agenda = [];
-  const inicioStr = String(fechaInicioISO || '').match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
-  if (!inicioStr) return agenda;
-
-  const inicio = new Date(`${inicioStr}T12:00:00`);
-  if (Number.isNaN(inicio.getTime())) return agenda;
-
-  const plazo = Math.min(Math.max(1, Number(plazoSemanas) || 1), 520);
-  const dias = (Array.isArray(diasDeCobro) ? diasDeCobro : ['LUNES']).filter(Boolean);
-  if (!dias.length) dias.push('LUNES');
-
   for (let semana = 0; semana < plazo; semana += 1) {
     for (const nombreDia of dias) {
       const targetDay = diaSemanaIndice(nombreDia);
@@ -78,12 +99,8 @@ const generarAgendaDeCobro = (fechaInicioISO, plazoSemanas, diasDeCobro = ['LUNE
       fecha.setDate(inicio.getDate() + semana * 7);
       const delta = (targetDay - fecha.getDay() + 7) % 7;
       fecha.setDate(fecha.getDate() + delta);
-      if (Number.isNaN(fecha.getTime())) continue;
-      const y = fecha.getFullYear();
-      const m = String(fecha.getMonth() + 1).padStart(2, '0');
-      const day = String(fecha.getDate()).padStart(2, '0');
-      const fechaISO = `${y}-${m}-${day}`;
-      if (fechaISO === inicioStr) continue;
+      const fechaISO = fechaAISO(fecha);
+      if (!fechaISO || fechaISO === inicioStr) continue;
       agenda.push({
         fecha_programada: fechaISO,
         monto_programado: cuotaPorDia,
@@ -92,8 +109,80 @@ const generarAgendaDeCobro = (fechaInicioISO, plazoSemanas, diasDeCobro = ['LUNE
       });
     }
   }
+  return agenda;
+};
 
-  return agenda.sort((a, b) => a.fecha_programada.localeCompare(b.fecha_programada));
+const generarAgendaDiasMes = (inicioStr, inicio, plazo, diasMes, cuotaPorDia) => {
+  const agenda = [];
+  const venc = new Date(inicio.getTime());
+  venc.setDate(venc.getDate() + plazo * 7);
+  const vencISO = fechaAISO(venc);
+  if (!vencISO) return agenda;
+  const dias = (Array.isArray(diasMes) ? diasMes : []).map(Number).filter((n) => n >= 1 && n <= 31);
+  if (!dias.length) return agenda;
+
+  let y = inicio.getFullYear();
+  let m = inicio.getMonth();
+  const endY = venc.getFullYear();
+  const endM = venc.getMonth();
+  const maxIter = (endY - y) * 12 + (endM - m) + 3;
+
+  for (let i = 0; i < maxIter; i += 1) {
+    for (const diaMes of dias) {
+      const fecha = fechaDiaDelMes(y, m, diaMes);
+      const fechaISO = fechaAISO(fecha);
+      if (!fechaISO) continue;
+      if (fechaISO <= inicioStr) continue;
+      if (fechaISO > vencISO) continue;
+      agenda.push({
+        fecha_programada: fechaISO,
+        monto_programado: cuotaPorDia,
+        estado: 'Programada',
+        dia: String(diaMes),
+      });
+    }
+    m += 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    if (y > endY || (y === endY && m > endM + 1)) break;
+  }
+
+  const seen = new Set();
+  return agenda
+    .filter((a) => {
+      if (seen.has(a.fecha_programada)) return false;
+      seen.add(a.fecha_programada);
+      return true;
+    })
+    .sort((a, b) => a.fecha_programada.localeCompare(b.fecha_programada));
+};
+
+const generarAgendaDeCobro = (
+  fechaInicioISO,
+  plazoSemanas,
+  diasDeCobro = ['LUNES'],
+  cuotaPorDia = 0,
+  opts = {}
+) => {
+  const inicioStr = String(fechaInicioISO || '').match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+  if (!inicioStr) return [];
+  const inicio = new Date(`${inicioStr}T12:00:00`);
+  if (Number.isNaN(inicio.getTime())) return [];
+  const plazo = Math.min(Math.max(1, Number(plazoSemanas) || 1), 520);
+  const freq = resolverFrecuenciaCobro({
+    tipo_frecuencia: opts.tipo_frecuencia || opts.periodicidad,
+    dias_de_cobro: diasDeCobro,
+    dias_mes: opts.dias_mes,
+  });
+  if (freq.tipo === TIPO_DIAS_MES || esListaDiasMes(freq.diasParaAgenda)) {
+    return generarAgendaDiasMes(inicioStr, inicio, plazo, freq.diasMes, cuotaPorDia);
+  }
+  const dias = freq.diasSemana.length ? freq.diasSemana : ['LUNES'];
+  return generarAgendaSemanal(inicioStr, inicio, plazo, dias, cuotaPorDia).sort((a, b) =>
+    a.fecha_programada.localeCompare(b.fecha_programada)
+  );
 };
 
 /** Pagado acumulado fiable: max(suma pagos, total - saldo). */
@@ -135,6 +224,17 @@ function ajustarAgendaAlMontoTotal(agenda, montoTotalPagar) {
   }
 
   return agenda;
+}
+
+/** Tras generar agenda: repartir monto_total en visitas iguales + ajuste centavos. */
+function repartirMontoEnAgenda(agenda, montoTotalPagar) {
+  if (!Array.isArray(agenda) || !agenda.length) return agenda;
+  const total = Number(montoTotalPagar || 0);
+  if (total <= 0) return agenda;
+  const n = agenda.length;
+  const base = Number((total / n).toFixed(2));
+  for (const c of agenda) c.monto_programado = base;
+  return ajustarAgendaAlMontoTotal(agenda, total);
 }
 
 const numSeguro = (v, def = 0) => {
@@ -269,6 +369,7 @@ module.exports = {
   calcularCuotaYDistribucion,
   generarAgendaDeCobro,
   ajustarAgendaAlMontoTotal,
+  repartirMontoEnAgenda,
   calcularLiquidacionAnticipada,
   fechaVencimientoCredito,
   prestamoEstaVencido,

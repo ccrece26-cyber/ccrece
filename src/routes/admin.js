@@ -424,6 +424,7 @@ async function patchReciboFisicoPrestamo(req, res) {
 async function updatePrestamoFrecuencia(req, res) {
   try {
     const { id } = req.params;
+    const { resolverFrecuenciaCobro, TIPO_DIAS_MES } = require('../utils/frecuenciaCobro');
     let dias = req.body.dias_de_cobro;
     if (typeof dias === 'string') {
       try {
@@ -432,12 +433,18 @@ async function updatePrestamoFrecuencia(req, res) {
         return res.status(400).json({ success: false, message: 'dias_de_cobro invalido' });
       }
     }
+    const freqResolved = resolverFrecuenciaCobro({
+      tipo_frecuencia: req.body.tipo_frecuencia || req.body.periodicidad,
+      dias_de_cobro: dias,
+      dias_mes: req.body.dias_mes,
+    });
+    dias = freqResolved.diasParaAgenda;
     if (!Array.isArray(dias) || !dias.length) {
       return res.status(400).json({ success: false, message: 'Seleccione al menos un dia de cobro.' });
     }
     const freq = dias.length;
     const rows = await query(
-      `SELECT id, cuota_semanal_base, estado FROM Prestamos WHERE id = ? AND deleted_at IS NULL`,
+      `SELECT id, cuota_semanal_base, monto_total_pagar, estado FROM Prestamos WHERE id = ? AND deleted_at IS NULL`,
       [id]
     );
     if (!rows.length) return res.status(404).json({ success: false, message: 'Prestamo no encontrado' });
@@ -445,11 +452,21 @@ async function updatePrestamoFrecuencia(req, res) {
     if (p.estado !== 'Activo') {
       return res.status(400).json({ success: false, message: 'Solo prestamos activos' });
     }
-    const cuotaVisita = Number((Number(p.cuota_semanal_base) / freq).toFixed(2));
-    const diasJson = JSON.stringify(dias.map((d) => String(d).toUpperCase()));
+    let cuotaVisita;
+    if (freqResolved.tipo === TIPO_DIAS_MES) {
+      // Mantener cuota_semanal; visita ≈ semanal * 4 / nDiasMes (aprox mes)
+      cuotaVisita = Number(((Number(p.cuota_semanal_base) * 4) / freq).toFixed(2));
+    } else {
+      cuotaVisita = Number((Number(p.cuota_semanal_base) / freq).toFixed(2));
+    }
+    const diasJson = JSON.stringify(
+      freqResolved.tipo === TIPO_DIAS_MES
+        ? dias.map((d) => Number(d))
+        : dias.map((d) => String(d).toUpperCase())
+    );
     await query(
-      `UPDATE Prestamos SET dias_de_cobro = ?, frecuencia_semana = ?, is_synced = 1, updated_at = NOW() WHERE id = ?`,
-      [diasJson, freq, id]
+      `UPDATE Prestamos SET dias_de_cobro = ?, frecuencia_semana = ?, periodicidad = ?, is_synced = 1, updated_at = NOW() WHERE id = ?`,
+      [diasJson, freq, freqResolved.periodicidad, id]
     );
     await query(
       `UPDATE Cuotas_Calendario SET monto_programado = ?, is_synced = 0
@@ -459,7 +476,13 @@ async function updatePrestamoFrecuencia(req, res) {
     await afterCarteraMutation();
     return res.json({
       success: true,
-      data: { id, dias_de_cobro: dias, frecuencia_semana: freq, cuota_por_visita: cuotaVisita },
+      data: {
+        id,
+        dias_de_cobro: dias,
+        frecuencia_semana: freq,
+        periodicidad: freqResolved.periodicidad,
+        cuota_por_visita: cuotaVisita,
+      },
     });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

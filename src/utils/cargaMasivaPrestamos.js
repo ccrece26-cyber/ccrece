@@ -18,7 +18,9 @@ const {
   calcularCuotaYDistribucion,
   generarAgendaDeCobro,
   ajustarAgendaAlMontoTotal,
+  repartirMontoEnAgenda,
 } = require('./finanzasNube');
+const { resolverFrecuenciaCobro, TIPO_DIAS_MES } = require('./frecuenciaCobro');
 const { optimizarOrdenRuta } = require('./rutas');
 
 const DIAS_ALIASES = {
@@ -73,19 +75,9 @@ const txt = (v) => {
 };
 
 const parseDiasCobro = (raw) => {
-  if (!raw) return ['LUNES'];
-  if (Array.isArray(raw)) return raw.map((d) => DIAS_ALIASES[normKey(d).toUpperCase()] || String(d).toUpperCase());
-  const partes = String(raw)
-    .split(/[,;|/+\s]+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  const dias = [];
-  for (const p of partes) {
-    const k = normKey(p).toUpperCase().replace(/_/g, '');
-    const dia = DIAS_ALIASES[k] || DIAS_ALIASES[p.toUpperCase()] || (k.length >= 3 ? k.slice(0, 9) : null);
-    if (dia && !dias.includes(dia)) dias.push(dia);
-  }
-  return dias.length ? dias : ['LUNES'];
+  // Legacy helper — prefer resolverFrecuenciaCobro
+  const freq = resolverFrecuenciaCobro({ dias_cobro: raw });
+  return freq.diasParaAgenda;
 };
 
 const excelSerialAISO = (serial) => {
@@ -174,7 +166,12 @@ function normalizarFila(raw, indice) {
   const monto = num(src.monto_desembolsado ?? src.monto ?? src.capital);
   const plazo = num(src.plazo_semanas ?? src.plazo);
   const tasaMensual = parseTasaMensualInput(src.tasa_mensual ?? src.tasa ?? '10');
-  const dias = parseDiasCobro(src.dias_cobro ?? src.dias_de_cobro ?? src.dias);
+  const freq = resolverFrecuenciaCobro({
+    tipo_frecuencia: src.tipo_frecuencia ?? src.periodicidad ?? src.tipo_cobro,
+    dias_cobro: src.dias_cobro ?? src.dias_de_cobro ?? src.dias,
+    dias_mes: src.dias_mes ?? src.dias_del_mes,
+  });
+  const dias = freq.diasParaAgenda;
   const fecha_desembolso = parseFechaISO(src.fecha_desembolso ?? src.fecha_inicio);
   let saldo_pendiente = num(src.saldo_pendiente ?? src.saldo);
   const monto_pagado_historico = num(src.monto_pagado_historico ?? src.monto_pagado ?? src.abonado_historico);
@@ -202,6 +199,9 @@ function normalizarFila(raw, indice) {
     plazo_semanas: plazo != null ? Math.floor(plazo) : null,
     tasa_mensual: tasaMensual,
     dias_de_cobro: dias,
+    tipo_frecuencia: freq.tipo,
+    periodicidad: freq.periodicidad,
+    dias_mes: freq.diasMes,
     fecha_desembolso,
     saldo_pendiente,
     monto_pagado_historico,
@@ -251,21 +251,32 @@ function resolverCobrador(fila, mapa) {
 }
 
 function resolverImportacionFinanciera(fila) {
+  const opts = {
+    tipo_frecuencia: fila.tipo_frecuencia || fila.periodicidad,
+    dias_mes: fila.dias_mes,
+  };
   const fin = calcularCuotaYDistribucion(
     fila.monto_desembolsado,
     fila.plazo_semanas,
     fila.dias_de_cobro,
-    fila.tasa_mensual
+    fila.tasa_mensual,
+    opts
   );
-  const agenda = ajustarAgendaAlMontoTotal(
-    generarAgendaDeCobro(
-      fila.fecha_desembolso,
-      fila.plazo_semanas,
-      fila.dias_de_cobro,
-      fin.cuotaPorDiaDeCobro
-    ),
-    fin.montoTotalPagar
+  let agenda = generarAgendaDeCobro(
+    fila.fecha_desembolso,
+    fila.plazo_semanas,
+    fila.dias_de_cobro,
+    fin.cuotaPorDiaDeCobro,
+    opts
   );
+  if (fin.tipo_frecuencia === TIPO_DIAS_MES || (fila.periodicidad === TIPO_DIAS_MES)) {
+    agenda = repartirMontoEnAgenda(agenda, fin.montoTotalPagar);
+    if (agenda.length) {
+      fin.cuotaPorDiaDeCobro = Number(agenda[0].monto_programado || fin.cuotaPorDiaDeCobro);
+    }
+  } else {
+    agenda = ajustarAgendaAlMontoTotal(agenda, fin.montoTotalPagar);
+  }
   const total = fin.montoTotalPagar;
   const cuotasPorSemana = fila.dias_de_cobro.length || 1;
 
@@ -760,6 +771,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       saldo_pendiente: saldo,
       frecuencia_semana: fin.frecuenciaSemanal,
       dias_de_cobro: diasJson,
+      periodicidad: fila.periodicidad || fin.periodicidad || 'SEMANAL',
       fecha_desembolso: fila.fecha_desembolso,
     });
 
@@ -867,7 +879,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana,
         dias_de_cobro, periodicidad, estado, fecha_desembolso, is_synced
       )`,
-      placeholder: "(?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', 'Activo', ?, 1)",
+      placeholder: '(?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'Activo\', ?, 1)',
       values: (p) => [
         p.id,
         p.cliente_id,
@@ -879,6 +891,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         p.saldo_pendiente,
         p.frecuencia_semana,
         p.dias_de_cobro,
+        p.periodicidad || 'SEMANAL',
         p.fecha_desembolso,
       ],
     },
@@ -1102,13 +1115,14 @@ async function importarUnaFila(conn, fila, ctx) {
 
   const prestamoId = uuidv4();
   const diasJson = JSON.stringify(fila.dias_de_cobro);
+  const periodicidad = fila.periodicidad || fin.periodicidad || 'SEMANAL';
   await conn.execute(
     `INSERT INTO Prestamos (
       id, cliente_id, fiador_id,
       monto_desembolsado, plazo_semanas, tasa_interes_aplicada,
       cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana,
       dias_de_cobro, periodicidad, estado, fecha_desembolso, is_synced
-    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', 'Activo', ?, 1)`,
+    ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo', ?, 1)`,
     [
       prestamoId,
       clienteId,
@@ -1120,6 +1134,7 @@ async function importarUnaFila(conn, fila, ctx) {
       saldo,
       fin.frecuenciaSemanal,
       diasJson,
+      periodicidad,
       fila.fecha_desembolso,
     ]
   );
@@ -1275,7 +1290,9 @@ module.exports = {
     'monto_desembolsado',
     'plazo_semanas',
     'tasa_mensual',
+    'tipo_frecuencia',
     'dias_cobro',
+    'dias_mes',
     'fecha_desembolso',
     'saldo_pendiente',
     'monto_pagado_historico',

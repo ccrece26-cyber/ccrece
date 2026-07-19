@@ -48,27 +48,28 @@ const diaCobroDeFecha = (fechaISO) => {
   return MAPA[d.getDay()];
 };
 
-const incluyeDiaHoy = (diasRaw) => {
+const incluyeDiaHoy = (diasRaw, fechaRefISO = null, periodicidad = null) => {
   try {
     const dias = typeof diasRaw === 'string' ? JSON.parse(diasRaw) : diasRaw;
     if (!Array.isArray(dias) || !dias.length) return true;
-    const hoy = normalizarDia(diaCobroHoy());
+    const nums = dias.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 31);
+    const esMes =
+      String(periodicidad || '').toUpperCase() === 'DIAS_MES' ||
+      (nums.length === dias.length && nums.length > 0);
+    if (esMes) {
+      const ref = normalizarFechaISO(fechaRefISO) || fechaCalendarioISO();
+      const dayNum = Number(String(ref).slice(8, 10));
+      return nums.includes(dayNum);
+    }
+    const hoy = normalizarDia(fechaRefISO ? diaCobroDeFecha(fechaRefISO) : diaCobroHoy());
     return dias.some((d) => normalizarDia(d) === hoy);
   } catch {
     return true;
   }
 };
 
-const incluyeDiaEnFecha = (fechaISO, diasRaw) => {
-  try {
-    const dias = typeof diasRaw === 'string' ? JSON.parse(diasRaw) : diasRaw;
-    if (!Array.isArray(dias) || !dias.length) return true;
-    const dia = normalizarDia(diaCobroDeFecha(fechaISO));
-    return dias.some((d) => normalizarDia(d) === dia);
-  } catch {
-    return true;
-  }
-};
+const incluyeDiaEnFecha = (fechaISO, diasRaw, periodicidad = null) =>
+  incluyeDiaHoy(diasRaw, fechaISO, periodicidad);
 
 const esDiaDesembolso = (fechaDesembolso, fechaRefISO = fechaCalendarioISO()) => {
   const des = normalizarFechaISO(fechaDesembolso);
@@ -79,7 +80,7 @@ const esDiaDesembolso = (fechaDesembolso, fechaRefISO = fechaCalendarioISO()) =>
 /** ¿Incluir en agenda/ruta del día? No el mismo día del desembolso. */
 const debeSugerirCobroEnFecha = (fechaRefISO, prestamo) => {
   if (!prestamo) return false;
-  if (!incluyeDiaEnFecha(fechaRefISO, prestamo.dias_de_cobro)) return false;
+  if (!incluyeDiaEnFecha(fechaRefISO, prestamo.dias_de_cobro, prestamo.periodicidad)) return false;
   if (esDiaDesembolso(prestamo.fecha_desembolso, fechaRefISO)) return false;
   return true;
 };

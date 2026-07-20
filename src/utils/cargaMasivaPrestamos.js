@@ -1,6 +1,18 @@
 const { v4: uuidv4 } = require('uuid');
 const { nombreCompleto } = require('./cliente');
-const { normalizarCedula, validarCedula } = require('./cedulaNic');
+const {
+  normalizarCedula,
+  validarCedula,
+  codigoSinDocumento,
+} = require('./cedulaNic');
+
+function parseDocumentoTipo(raw) {
+  const t = String(raw || '')
+    .trim()
+    .toLowerCase();
+  if (t === 'extranjero' || t === 'ext' || t === 'foreign' || t === 'e') return 'extranjero';
+  return 'nacional';
+}
 const { reserveClienteIds, initSecuenciaCliente } = require('./clienteId');
 const { insertMany, updateManyById } = require('./bulkSql');
 const { aplicarMontoACuotas, recalcularSaldoPrestamoDesdeCuotas } = require('./registrarPagoNube');
@@ -139,7 +151,11 @@ function normalizarFila(raw, indice) {
     src[normKey(k)] = v;
   }
 
-  const cedula = normalizarCedula(txt(src.cedula));
+  const documento_tipo = parseDocumentoTipo(
+    src.documento_tipo ?? src.tipo_documento ?? src.tipo_doc
+  );
+  const valCed = validarCedula(txt(src.cedula), { tipo: documento_tipo, requerido: false });
+  const cedula = valCed.cedula || null;
   const cobrador_email = txt(src.cobrador_email || src.email_cobrador);
   const cobrador_id = txt(src.cobrador_id || src.id_cobrador);
 
@@ -183,6 +199,7 @@ function normalizarFila(raw, indice) {
   return {
     _fila: indice + 1,
     cedula,
+    documento_tipo,
     primer_nombre,
     segundo_nombre,
     primer_apellido,
@@ -213,11 +230,10 @@ function normalizarFila(raw, indice) {
 
 function validarFilaCampos(fila) {
   const errores = [];
-  if (!fila.cedula) errores.push('Cedula requerida en carga masiva (identifica al cliente)');
-  else {
-    const v = validarCedula(fila.cedula, { requerido: false });
-    if (!v.ok) errores.push(v.error);
-  }
+  const tipo = fila.documento_tipo === 'extranjero' ? 'extranjero' : 'nacional';
+  const v = validarCedula(fila.cedula, { tipo, requerido: false });
+  if (!v.ok) errores.push(v.error);
+  // Sin cédula: se crea cliente nuevo con código SINDOC-{id} (no se reutiliza uno existente).
   if (!fila.nombre_completo) errores.push('Nombre requerido (nombre_completo o primer_nombre + primer_apellido)');
   if (!fila.cobrador_email && !fila.cobrador_id) errores.push('cobrador_email o cobrador_id requerido');
   if (!fila.monto_desembolsado || fila.monto_desembolsado <= 0) errores.push('monto_desembolsado invalido');
@@ -510,6 +526,7 @@ async function validarFilas(filasRaw, queryFn) {
     validas.push({
       fila: fila._fila,
       cedula: fila.cedula,
+      documento_tipo: fila.documento_tipo,
       nombre_completo: fila.nombre_completo,
       cobrador: cobrador.nombre_completo,
       cobrador_id: cobrador.id,
@@ -681,9 +698,9 @@ async function insertarCuotasBulk(conn, cuotasRows) {
 async function importarFilasEnLote(conn, preparadas, mapa) {
   const cedulaMap = await precargarCedulas(
     conn,
-    preparadas.map((p) => p.cedula)
+    preparadas.map((p) => p.cedula).filter(Boolean)
   );
-  const nuevos = preparadas.filter((p) => !cedulaMap.has(p.cedula)).length;
+  const nuevos = preparadas.filter((p) => !p.cedula || !cedulaMap.has(p.cedula)).length;
   const newIds = await reserveClienteIds(conn, nuevos);
   let newIdIdx = 0;
 
@@ -693,11 +710,17 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
 
   const clienteIdsPrevistos = [];
   for (const fila of preparadas) {
-    clienteIdsPrevistos.push(cedulaMap.get(fila.cedula) || newIds[newIdIdx]);
-    if (!cedulaMap.has(fila.cedula)) newIdIdx += 1;
+    const existing = fila.cedula ? cedulaMap.get(fila.cedula) : null;
+    if (existing) {
+      clienteIdsPrevistos.push(existing);
+    } else {
+      clienteIdsPrevistos.push(newIds[newIdIdx]);
+      newIdIdx += 1;
+    }
   }
   const activos = await precargarClientesConCreditoActivo(conn, clienteIdsPrevistos);
   for (const fila of preparadas) {
+    if (!fila.cedula) continue;
     const cid = cedulaMap.get(fila.cedula);
     if (cid && activos.has(cid)) {
       throw new Error(`Cliente ya tiene credito activo (${fila.cedula})`);
@@ -718,8 +741,9 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico, fecha_ultimo_abono } =
       resolverImportacionFinanciera(fila);
 
-    let clienteId = cedulaMap.get(fila.cedula);
+    let clienteId = fila.cedula ? cedulaMap.get(fila.cedula) : null;
     let clienteNuevo = false;
+    const documento_tipo = fila.documento_tipo === 'extranjero' ? 'extranjero' : 'nacional';
     if (clienteId) {
       clientesUpdate.push({
         id: clienteId,
@@ -728,6 +752,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         primer_apellido: fila.primer_apellido,
         segundo_apellido: fila.segundo_apellido,
         nombre_completo: fila.nombre_completo,
+        documento_tipo,
         telefono: fila.telefono,
         direccion: fila.direccion,
         actividad_economica: fila.actividad_economica,
@@ -738,7 +763,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     } else {
       clienteId = newIds[newIdIdx];
       newIdIdx += 1;
-      cedulaMap.set(fila.cedula, clienteId);
+      const cedulaFinal = fila.cedula || codigoSinDocumento(clienteId);
+      if (fila.cedula) cedulaMap.set(fila.cedula, clienteId);
       clienteNuevo = true;
       clientesInsert.push({
         id: clienteId,
@@ -747,7 +773,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         primer_apellido: fila.primer_apellido,
         segundo_apellido: fila.segundo_apellido,
         nombre_completo: fila.nombre_completo,
-        cedula: fila.cedula,
+        cedula: cedulaFinal,
+        documento_tipo,
         telefono: fila.telefono,
         direccion: fila.direccion,
         actividad_economica: fila.actividad_economica,
@@ -800,7 +827,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
 
     const item = {
       fila: fila._fila,
-      cedula: fila.cedula,
+      cedula: fila.cedula || codigoSinDocumento(clienteId),
+      documento_tipo,
       cliente_id: clienteId,
       prestamo_id: prestamoId,
       cliente_nuevo: clienteNuevo,
@@ -820,10 +848,10 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       {
         insert: `INSERT INTO Clientes (
           id, primer_nombre, segundo_nombre, primer_apellido, segundo_apellido,
-          nombre_completo, cedula, telefono, direccion, actividad_economica,
+          nombre_completo, cedula, documento_tipo, telefono, direccion, actividad_economica,
           latitud, longitud, cobrador_id, is_synced
         )`,
-        placeholder: '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+        placeholder: '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
         values: (c) => [
           c.id,
           c.primer_nombre,
@@ -832,6 +860,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
           c.segundo_apellido,
           c.nombre_completo,
           c.cedula,
+          c.documento_tipo || 'nacional',
           c.telefono,
           c.direccion,
           c.actividad_economica,
@@ -849,7 +878,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     await conn.execute(
       `UPDATE Clientes SET
         primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
-        nombre_completo = ?, telefono = COALESCE(?, telefono), direccion = COALESCE(?, direccion),
+        nombre_completo = ?, documento_tipo = COALESCE(?, documento_tipo),
+        telefono = COALESCE(?, telefono), direccion = COALESCE(?, direccion),
         actividad_economica = COALESCE(?, actividad_economica),
         latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
         cobrador_id = ?, updated_at = NOW()
@@ -860,6 +890,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         c.primer_apellido,
         c.segundo_apellido,
         c.nombre_completo,
+        c.documento_tipo || 'nacional',
         c.telefono,
         c.direccion,
         c.actividad_economica,
@@ -1049,14 +1080,16 @@ async function importarUnaFila(conn, fila, ctx) {
   const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico, fecha_ultimo_abono } =
     resolverImportacionFinanciera(fila);
 
-  let clienteId = ctx.cedulaMap.get(fila.cedula);
+  let clienteId = fila.cedula ? ctx.cedulaMap.get(fila.cedula) : null;
   let clienteNuevo = false;
+  const documento_tipo = fila.documento_tipo === 'extranjero' ? 'extranjero' : 'nacional';
 
   if (clienteId) {
     await conn.execute(
       `UPDATE Clientes SET
         primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
-        nombre_completo = ?, telefono = COALESCE(?, telefono), direccion = COALESCE(?, direccion),
+        nombre_completo = ?, documento_tipo = COALESCE(?, documento_tipo),
+        telefono = COALESCE(?, telefono), direccion = COALESCE(?, direccion),
         actividad_economica = COALESCE(?, actividad_economica),
         latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
         cobrador_id = ?, updated_at = NOW()
@@ -1067,6 +1100,7 @@ async function importarUnaFila(conn, fila, ctx) {
         fila.primer_apellido,
         fila.segundo_apellido,
         fila.nombre_completo,
+        documento_tipo,
         fila.telefono,
         fila.direccion,
         fila.actividad_economica,
@@ -1079,14 +1113,15 @@ async function importarUnaFila(conn, fila, ctx) {
   } else {
     clienteId = ctx.newIds[ctx.newIdIdx];
     ctx.newIdIdx += 1;
-    ctx.cedulaMap.set(fila.cedula, clienteId);
+    const cedulaFinal = fila.cedula || codigoSinDocumento(clienteId);
+    if (fila.cedula) ctx.cedulaMap.set(fila.cedula, clienteId);
     clienteNuevo = true;
     await conn.execute(
       `INSERT INTO Clientes (
         id, primer_nombre, segundo_nombre, primer_apellido, segundo_apellido,
-        nombre_completo, cedula, telefono, direccion, actividad_economica,
+        nombre_completo, cedula, documento_tipo, telefono, direccion, actividad_economica,
         latitud, longitud, cobrador_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [
         clienteId,
         fila.primer_nombre,
@@ -1094,7 +1129,8 @@ async function importarUnaFila(conn, fila, ctx) {
         fila.primer_apellido,
         fila.segundo_apellido,
         fila.nombre_completo,
-        fila.cedula,
+        cedulaFinal,
+        documento_tipo,
         fila.telefono,
         fila.direccion,
         fila.actividad_economica,
@@ -1278,6 +1314,7 @@ module.exports = {
   calcularPreview,
   PLANTILLA_COLUMNAS: [
     'cedula',
+    'documento_tipo',
     'primer_nombre',
     'primer_apellido',
     'segundo_nombre',

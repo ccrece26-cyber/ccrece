@@ -12,6 +12,7 @@ const { query, pool } = require('../config/db');
 
 const COLUMNAS = [
   'cedula',
+  'documento_tipo',
   'primer_nombre',
   'primer_apellido',
   'segundo_nombre',
@@ -40,12 +41,19 @@ const COLUMNAS = [
 const INSTRUCCIONES = [
   {
     campo: 'cedula',
-    nota: 'Obligatorio. 14 caracteres: 13 números + 1 letra mayúscula, sin guiones (ej. 0011208760015A).',
+    nota: 'Opcional. Nacional: 13 dígitos + letra (ej. 0011208760015A), puede /2. Vacío → SINDOC-{código}. Extranjero: cualquier doc.',
+  },
+  {
+    campo: 'documento_tipo',
+    nota: 'nacional (default) | extranjero. Extranjero no exige formato NIC.',
   },
   { campo: 'cobrador_email', nota: 'Email real del cobrador (hoja Cobradores). No use EJEMPLO@borrar.com.' },
   { campo: 'monto_desembolsado', nota: 'Capital original (ej. 5000).' },
-  { campo: 'plazo_semanas', nota: 'Semanas del plan. Interés: 10% × (plazo/4). Mes = 4 semanas.' },
-  { campo: 'tasa_mensual', nota: '10 = 10% por mes financiero.' },
+  {
+    campo: 'plazo_semanas',
+    nota: 'Semanas del plan. Interés: tasa_mensual × (plazo/4). Mes = 4 semanas. Ej. 22 sem × 10% = 55% global.',
+  },
+  { campo: 'tasa_mensual', nota: '10 = 10% por mes financiero (NO es la tasa global).' },
   {
     campo: 'tipo_frecuencia',
     nota: 'SEMANAL o DIAS_MES. Si vacío, se detecta por dias_cobro/dias_mes.',
@@ -62,6 +70,7 @@ const INSTRUCCIONES = [
 const FILAS_EJEMPLO = [
   {
     cedula: '0011208760015A',
+    documento_tipo: 'nacional',
     primer_nombre: 'Maria',
     primer_apellido: 'Lopez',
     nombre_completo: 'Maria Elena Lopez',
@@ -83,15 +92,37 @@ const FILAS_EJEMPLO = [
     orden_visita: 1,
   },
   {
-    cedula: '0011309870023B',
-    primer_nombre: 'Juan',
-    primer_apellido: 'Perez',
-    nombre_completo: 'Juan Carlos Perez',
+    cedula: 'PASSPORT-HX9912',
+    documento_tipo: 'extranjero',
+    primer_nombre: 'John',
+    primer_apellido: 'Smith',
+    nombre_completo: 'John Smith',
     telefono: '86501122',
     direccion: 'Reparto San Jose',
     actividad_economica: 'Venta de ropa',
     cobrador_email: 'EJEMPLO@borrar.com',
     monto_desembolsado: 8000,
+    plazo_semanas: 22,
+    tasa_mensual: 10,
+    tipo_frecuencia: 'SEMANAL',
+    dias_cobro: 'LUNES,MARTES,VIERNES',
+    dias_mes: '',
+    fecha_desembolso: '2026-01-24',
+    saldo_pendiente: 6000,
+    semanas_pagadas: 4,
+    orden_visita: 2,
+  },
+  {
+    cedula: '',
+    documento_tipo: 'nacional',
+    primer_nombre: 'Ana',
+    primer_apellido: 'Garcia',
+    nombre_completo: 'Ana Sofia Garcia',
+    telefono: '87770011',
+    direccion: 'Mercado Municipal',
+    actividad_economica: 'Comedor',
+    cobrador_email: 'EJEMPLO@borrar.com',
+    monto_desembolsado: 10000,
     plazo_semanas: 12,
     tasa_mensual: 10,
     tipo_frecuencia: 'DIAS_MES',
@@ -100,7 +131,7 @@ const FILAS_EJEMPLO = [
     fecha_desembolso: '2026-01-05',
     saldo_pendiente: 11000,
     semanas_pagadas: 2,
-    orden_visita: 2,
+    orden_visita: 3,
   },
 ];
 

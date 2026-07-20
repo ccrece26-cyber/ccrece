@@ -249,6 +249,27 @@ function filaACarga(row) {
     if (Number.isFinite(n) && n >= 1) codigo_cliente = `CC-${n}`;
   }
 
+  const plazo = Math.floor(Number(row.plazo_semanas) || 0);
+  let semanas_pagadas = '';
+  if (row.semanas_pagadas !== '' && row.semanas_pagadas != null) {
+    let sem = Math.max(0, Math.floor(Number(row.semanas_pagadas) || 0));
+    // En el archivo fuente a menudo mezclan "visitas" con "semanas".
+    // Si sem > plazo y hay varios días de cobro, intentar convertir visitas → semanas.
+    const diasN = String(row.dias_cobro || '')
+      .split(/[,;|]/)
+      .map((s) => s.trim())
+      .filter(Boolean).length;
+    if (sem > plazo && plazo > 0 && diasN > 1 && sem % diasN === 0) {
+      sem = Math.floor(sem / diasN);
+    }
+    // Si aún supera el plazo, vaciar: la verdad es saldo_pendiente / monto_pagado_historico.
+    if (plazo > 0 && sem > plazo) {
+      semanas_pagadas = '';
+    } else {
+      semanas_pagadas = sem;
+    }
+  }
+
   return {
     codigo_cliente,
     cedula,
@@ -263,7 +284,7 @@ function filaACarga(row) {
     actividad_economica: row.actividad_economica || '',
     cobrador_email: resolverCobrador(row),
     monto_desembolsado: Number(row.monto_desembolsado) || 0,
-    plazo_semanas: Math.floor(Number(row.plazo_semanas) || 0),
+    plazo_semanas: plazo,
     tasa_mensual: tasaMensualParaCarga(row),
     tipo_frecuencia,
     dias_cobro: tipo_frecuencia === 'DIAS_MES' ? '' : diasCobro,
@@ -275,10 +296,7 @@ function filaACarga(row) {
         ? Number(row.monto_pagado_historico)
         : '',
     fecha_ultimo_abono: fechaISO(row.fecha_ultimo_abono),
-    semanas_pagadas:
-      row.semanas_pagadas !== '' && row.semanas_pagadas != null
-        ? Number(row.semanas_pagadas)
-        : '',
+    semanas_pagadas,
     latitud: row.latitud !== '' && row.latitud != null ? Number(row.latitud) : '',
     longitud: row.longitud !== '' && row.longitud != null ? Number(row.longitud) : '',
     orden_visita:

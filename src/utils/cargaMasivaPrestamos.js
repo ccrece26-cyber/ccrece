@@ -244,6 +244,15 @@ function validarFilaCampos(fila) {
   if (!fila.monto_desembolsado || fila.monto_desembolsado <= 0) errores.push('monto_desembolsado invalido');
   if (!fila.plazo_semanas || fila.plazo_semanas < 1 || fila.plazo_semanas > 520) errores.push('plazo_semanas invalido (1-520)');
   if (!fila.fecha_desembolso) errores.push('fecha_desembolso invalida (YYYY-MM-DD)');
+  if (
+    fila.semanas_pagadas > 0 &&
+    fila.plazo_semanas > 0 &&
+    fila.semanas_pagadas > fila.plazo_semanas
+  ) {
+    // Dato basura del Excel fuente (a menudo son visitas, no semanas).
+    // No bloquear: la verdad es saldo / monto_pagado_historico.
+    fila.semanas_pagadas = 0;
+  }
   return errores;
 }
 

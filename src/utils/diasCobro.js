@@ -85,6 +85,35 @@ const debeSugerirCobroEnFecha = (fechaRefISO, prestamo) => {
   return true;
 };
 
+/**
+ * Agenda con feriados / anticipos:
+ * - En feriado: solo si hay cuota con fecha_programada = hoy (anticipo raro al feriado).
+ * - Fuera de feriado: día de cobro habitual O cuota movida/anticipada a hoy.
+ */
+const debeIncluirEnAgenda = (fechaRefISO, prestamo, opts = {}) => {
+  if (!prestamo) return false;
+  const ref = normalizarFechaISO(fechaRefISO) || fechaCalendarioISO();
+  if (esDiaDesembolso(prestamo.fecha_desembolso, ref)) return false;
+  const feriados = opts.feriadosSet;
+  const tieneCuotaHoy = !!opts.tieneCuotaHoy;
+  if (feriados && feriados.has(ref)) return tieneCuotaHoy;
+  if (tieneCuotaHoy) return true;
+  return incluyeDiaEnFecha(ref, prestamo.dias_de_cobro, prestamo.periodicidad);
+};
+
+const tieneCuotaProgramadaEnFecha = (cuotas, prestamoId, fechaISO, esCuotaDiaDesembolsoFn, prestamo) => {
+  const ref = normalizarFechaISO(fechaISO);
+  if (!ref || !prestamoId) return false;
+  return (cuotas || []).some((c) => {
+    if (c.prestamo_id !== prestamoId) return false;
+    if (c.estado && !['Programada', 'Parcial'].includes(c.estado)) return false;
+    const f = normalizarFechaISO(c.fecha_programada);
+    if (f !== ref) return false;
+    if (esCuotaDiaDesembolsoFn && esCuotaDiaDesembolsoFn(c, prestamo)) return false;
+    return true;
+  });
+};
+
 const esCuotaDiaDesembolso = (cuota, prestamo) => {
   const des = normalizarFechaISO(prestamo?.fecha_desembolso);
   if (!des) return false;
@@ -112,5 +141,7 @@ module.exports = {
   fechaCalendarioISO,
   esDiaDesembolso,
   debeSugerirCobroEnFecha,
+  debeIncluirEnAgenda,
+  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
 };

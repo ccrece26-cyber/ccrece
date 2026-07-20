@@ -1,10 +1,12 @@
 const {
   montoVisitaHoy,
   normalizarDia,
-  debeSugerirCobroEnFecha,
+  debeIncluirEnAgenda,
+  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('./diasCobro');
+const { cargarSetFeriados } = require('./feriados');
 const { rangoDiaLocal } = require('./fechasSql');
 const { analizarVisitaGps, resumenGpsAgenda, refCoordsCliente } = require('./gpsCumplimiento');
 const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
@@ -43,7 +45,16 @@ function esVisitaCobrada(estado) {
   return estado === 'cobrado' || estado === 'cobrado_admin';
 }
 
-function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gestiones_hoy, cobradorId = null) {
+function armarAgendaDesdeDatos(
+  hoy,
+  clientes,
+  prestamos,
+  cuotas,
+  pagos_hoy,
+  gestiones_hoy,
+  cobradorId = null,
+  feriadosSet = null
+) {
   const pagosRuta = pagos_hoy;
   const gestionesRuta = cobradorId
     ? gestiones_hoy.filter((g) => g.cobrador_id === cobradorId)
@@ -130,8 +141,21 @@ function armarAgendaDesdeDatos(hoy, clientes, prestamos, cuotas, pagos_hoy, gest
 
   for (const c of clientes) {
     const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
-    if (p && debeSugerirCobroEnFecha(hoy, p)) {
-      const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+    if (!p) continue;
+    const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+    const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
+      cuotasPrestamo,
+      p.id,
+      hoy,
+      esCuotaDiaDesembolso,
+      p
+    );
+    if (
+      debeIncluirEnAgenda(hoy, p, {
+        feriadosSet,
+        tieneCuotaHoy,
+      })
+    ) {
       const cuotaPend = seleccionarCuotaAgenda(
         cuotasPrestamo,
         p,
@@ -367,6 +391,7 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
 
 async function buildAgendaCobrador(query, cobradorId, fechaISO) {
   const datos = await cargarDatosCobrador(query, cobradorId, fechaISO);
+  const feriadosSet = await cargarSetFeriados();
   const armado = armarAgendaDesdeDatos(
     datos.hoy,
     datos.clientes,
@@ -374,7 +399,8 @@ async function buildAgendaCobrador(query, cobradorId, fechaISO) {
     datos.cuotas,
     datos.pagos_hoy,
     datos.gestiones_hoy,
-    cobradorId
+    cobradorId,
+    feriadosSet
   );
   return {
     dia_cobro: diaCobroDeFecha(datos.hoy),
@@ -392,6 +418,7 @@ async function buildAgendaCobrador(query, cobradorId, fechaISO) {
 async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisitas = false } = {}) {
   const cobIds = cobradores.map((c) => c.id);
   const datos = await cargarDatosTodosCobradores(query, cobIds, fechaISO);
+  const feriadosSet = await cargarSetFeriados();
   const cierreMap = new Map(
     datos.cierres.map((c) => [
       c.cobrador_id,
@@ -429,7 +456,8 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       datos.cuotas,
       pagosRutaCobrador,
       gestMerged,
-      cob.id
+      cob.id,
+      feriadosSet
     );
 
     const montoCobradoReal = pagosCob.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);

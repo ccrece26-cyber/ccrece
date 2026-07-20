@@ -75,17 +75,32 @@ function esRemanenteParcialAgenda(cuota, visitaTeorica) {
 
 function seleccionarCuotaAgenda(cuotasDelPrestamo, prestamo, hoy, esCuotaDiaDesembolso, montoVisitaHoyFn) {
   const hoyStr = hoy ? String(hoy).slice(0, 10) : null;
-  const visita = montoVisitaHoyFn(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro);
+  const visitaFn = montoVisitaHoyFn || require('./diasCobro').montoVisitaHoy;
+  const visita = visitaFn(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro, {
+    periodicidad: prestamo?.periodicidad,
+  });
   const saldo = Number(prestamo?.saldo_pendiente || 0);
 
-  for (const c of cuotasDelPrestamo) {
-    if (esCuotaDiaDesembolso(c, prestamo)) continue;
+  const candidata = (c) => {
+    if (esCuotaDiaDesembolso(c, prestamo)) return false;
     const fechaCuota = fechaCuotaISO(c);
-    if (hoyStr && fechaCuota && fechaCuota > hoyStr) continue;
+    if (hoyStr && fechaCuota && fechaCuota > hoyStr) return false;
     const pendiente = pendienteCuota(c);
-    if (esCuotaFantasma(pendiente, saldo, visita)) continue;
-    if (esRemanenteParcialAgenda(c, visita)) continue;
-    return c;
+    if (esCuotaFantasma(pendiente, saldo, visita)) return false;
+    if (esRemanenteParcialAgenda(c, visita)) return false;
+    return true;
+  };
+
+  // Preferir cuota exactamente de hoy (feriado corrido / anticipo admin)
+  if (hoyStr) {
+    for (const c of cuotasDelPrestamo) {
+      if (fechaCuotaISO(c) !== hoyStr) continue;
+      if (candidata(c)) return c;
+    }
+  }
+
+  for (const c of cuotasDelPrestamo) {
+    if (candidata(c)) return c;
   }
   return null;
 }

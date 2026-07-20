@@ -7,10 +7,12 @@ const { nextClienteId, esIdClienteOficial, initSecuenciaCliente } = require('../
 const {
   diaCobroHoy,
   montoVisitaHoy,
-  debeSugerirCobroEnFecha,
+  debeIncluirEnAgenda,
+  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('../utils/diasCobro');
+const { cargarSetFeriados, listarFeriadosActivos } = require('../utils/feriados');
 const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } = require('../utils/fiadoresNube');
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
@@ -130,6 +132,7 @@ async function rutaDiaria(req, res) {
 
     const hoyDia = diaCobroHoy();
     const agenda = [];
+    const feriadosSet = await cargarSetFeriados();
 
     let pagos_hoy = [];
     let gestiones_hoy = [];
@@ -227,11 +230,30 @@ async function rutaDiaria(req, res) {
 
     for (const c of clientes) {
       const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
-      if (p && debeSugerirCobroEnFecha(hoy, p)) {
-        const cuotaPend = cuotas.find(
-          (cc) => cc.prestamo_id === p.id && !esCuotaDiaDesembolso(cc, p)
+      if (p) {
+        const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+        const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
+          cuotasPrestamo,
+          p.id,
+          hoy,
+          esCuotaDiaDesembolso,
+          p
         );
-        pushAgendaItem(c, p, cuotaPend);
+        if (
+          debeIncluirEnAgenda(hoy, p, {
+            feriadosSet,
+            tieneCuotaHoy,
+          })
+        ) {
+          const cuotaPend =
+            cuotasPrestamo.find(
+              (cc) =>
+                String(cc.fecha_programada || '').slice(0, 10) === hoy &&
+                !esCuotaDiaDesembolso(cc, p)
+            ) ||
+            cuotasPrestamo.find((cc) => !esCuotaDiaDesembolso(cc, p));
+          pushAgendaItem(c, p, cuotaPend);
+        }
       }
 
       const pagosCliente = pagos_hoy.filter((pg) => pg.cliente_id === c.id);
@@ -310,6 +332,7 @@ async function rutaDiaria(req, res) {
         pagos_hoy,
         gestiones_hoy,
         pagos_anulados_hoy,
+        feriados: await listarFeriadosActivos(),
       },
     });
   } catch (e) {

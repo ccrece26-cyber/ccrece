@@ -8,6 +8,7 @@ const TABLAS_PULL = [
   'Prestamo_Garantias',
   'Cuotas_Calendario',
   'Parametros_Globales',
+  'Feriados',
 ];
 
 async function pullTabla(tabla, since, cobradorId) {

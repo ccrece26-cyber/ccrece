@@ -37,6 +37,13 @@ const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
+const {
+  ensureFeriadosTable,
+  listarFeriadosTodos,
+  moverCuotasDeFeriado,
+  anticiparCuotaPrestamo,
+  fechaISO: fechaFeriadoISO,
+} = require('../utils/feriados');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos, enriquecerPrestamosProrroga } = require('../utils/reporteVencidos');
@@ -2173,6 +2180,105 @@ async function negociarCredito(req, res) {
   }
 }
 
+async function listFeriados(req, res) {
+  try {
+    const data = await listarFeriadosTodos();
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+/** Marca un feriado y mueve cuotas de ese día al siguiente hábil (solo esa cuota). */
+async function createFeriado(req, res) {
+  const conn = await getConnection();
+  try {
+    await ensureFeriadosTable(conn);
+    const fecha = fechaFeriadoISO(req.body.fecha);
+    const nombre = txt(req.body.nombre) || 'Feriado';
+    if (!fecha) {
+      return res.status(400).json({ success: false, message: 'fecha requerida (YYYY-MM-DD)' });
+    }
+    await conn.beginTransaction();
+    const id = uuidv4();
+    await conn.execute(
+      `INSERT INTO Feriados (id, fecha, nombre, activo, is_synced)
+       VALUES (?, ?, ?, 1, 1)
+       ON DUPLICATE KEY UPDATE
+         nombre = VALUES(nombre),
+         activo = 1,
+         deleted_at = NULL,
+         is_synced = 1,
+         updated_at = NOW()`,
+      [id, fecha, nombre]
+    );
+    const mov = await moverCuotasDeFeriado(conn, fecha);
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({
+      success: true,
+      data: {
+        fecha,
+        nombre,
+        cuotas_movidas: mov.movidas,
+        destino: mov.destino,
+        mensaje:
+          mov.movidas > 0
+            ? `Feriado ${fecha}: ${mov.movidas} cuota(s) pasaron al ${mov.destino}.`
+            : `Feriado ${fecha} guardado. No había cuotas ese día.`,
+      },
+    });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function deleteFeriado(req, res) {
+  const conn = await getConnection();
+  try {
+    await ensureFeriadosTable(conn);
+    const id = req.params.id;
+    await conn.execute(
+      `UPDATE Feriados SET activo = 0, deleted_at = NOW(), updated_at = NOW() WHERE id = ?`,
+      [id]
+    );
+    await afterCarteraMutation(conn);
+    return res.json({
+      success: true,
+      message: 'Feriado desactivado. Las cuotas ya movidas no se revierten automáticamente.',
+    });
+  } catch (e) {
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * Anticipa una cuota pendiente a una fecha concreta (aparece en ruta ese día).
+ * Body: { prestamo_id, fecha_cobro, cuota_id? }
+ */
+async function anticiparCobro(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await anticiparCuotaPrestamo(conn, req.body.prestamo_id, req.body.fecha_cobro, {
+      cuota_id: req.body.cuota_id,
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 async function castigarPerdida(req, res) {
   const conn = await getConnection();
   try {
@@ -2291,6 +2397,10 @@ module.exports = {
   agregarGarantiasPrestamo,
   aplicarProrroga,
   negociarCredito,
+  listFeriados,
+  createFeriado,
+  deleteFeriado,
+  anticiparCobro,
   castigarPerdida,
   exportCarteraImportacion,
   esIdClienteOficial,

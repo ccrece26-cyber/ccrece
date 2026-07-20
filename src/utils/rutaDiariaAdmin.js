@@ -5,10 +5,12 @@ const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
 const {
   diaCobroHoy,
   montoVisitaHoy,
-  debeSugerirCobroEnFecha,
+  debeIncluirEnAgenda,
+  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('./diasCobro');
+const { cargarSetFeriados } = require('./feriados');
 const { rangoDiaLocal } = require('../utils/fechasSql');
 const { capMontoAlSaldo } = require('./cobroMontos');
 const { seleccionarCuotaAgenda, montoCobroDelDia } = require('./cuotasCalendario');
@@ -187,6 +189,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
       }
     }
 
+    const feriadosSet = await cargarSetFeriados();
     const pagoPorPrestamo = new Map(pagos_hoy.map((pg) => [pg.prestamo_id, pg]));
     const gestionPorPrestamo = new Map(gestiones_hoy.map((g) => [g.prestamo_id, g]));
     const prestamosEnAgenda = new Set();
@@ -248,8 +251,21 @@ async function loadAgendaAdminHoy(opciones = {}) {
 
     for (const c of clientes) {
       const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
-      if (p && debeSugerirCobroEnFecha(hoy, p)) {
-        const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+      if (!p) continue;
+      const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
+      const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
+        cuotasPrestamo,
+        p.id,
+        hoy,
+        esCuotaDiaDesembolso,
+        p
+      );
+      if (
+        debeIncluirEnAgenda(hoy, p, {
+          feriadosSet,
+          tieneCuotaHoy,
+        })
+      ) {
         const cuotaPend = seleccionarCuotaAgenda(
           cuotasPrestamo,
           p,

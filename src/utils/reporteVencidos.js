@@ -11,6 +11,21 @@ function parseDias(v) {
   }
 }
 
+/** Misma regla que finanzasNube.normalizarFechaDesembolso (DATE MySQL → YYYY-MM-DD). */
+function fechaISO(valor) {
+  if (valor == null || valor === '') return null;
+  if (valor instanceof Date && !Number.isNaN(valor.getTime())) {
+    const y = valor.getUTCFullYear();
+    const m = String(valor.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(valor.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(valor).trim();
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
+  return null;
+}
+
 function diasEntre(desdeISO, hastaISO) {
   const a = new Date(`${desdeISO}T12:00:00`);
   const b = new Date(`${hastaISO}T12:00:00`);
@@ -87,7 +102,7 @@ async function armarReporteVencidos() {
       cedula: p.cedula,
       telefono: p.telefono,
       cobrador: p.cobrador || 'Sin asignar',
-      fecha_desembolso: String(p.fecha_desembolso).slice(0, 10),
+      fecha_desembolso: fechaISO(p.fecha_desembolso) || String(p.fecha_desembolso || '').slice(0, 10),
       fecha_vencimiento: venc,
       dias_vencido: diasEntre(venc, hoy),
       plazo_semanas: Number(p.plazo_semanas),
@@ -158,7 +173,7 @@ async function enriquecerPrestamosProrroga(rows) {
     return {
       ...p,
       dias_de_cobro: dias,
-      fecha_desembolso: p.fecha_desembolso ? String(p.fecha_desembolso).slice(0, 10) : null,
+      fecha_desembolso: fechaISO(p.fecha_desembolso),
       fecha_vencimiento: venc,
       vencido,
       dias_vencido: vencido && venc ? diasEntre(venc, hoy) : 0,

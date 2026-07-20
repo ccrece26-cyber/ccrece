@@ -244,11 +244,23 @@ const numSeguro = (v, def = 0) => {
 
 const normalizarFechaDesembolso = (valor) => {
   if (valor == null || valor === '') return null;
+  // MySQL DATE → Date UTC 00:00 del día calendario; usar UTC (no zona local).
+  if (valor instanceof Date && !Number.isNaN(valor.getTime())) {
+    const y = valor.getUTCFullYear();
+    const m = String(valor.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(valor.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
   const s = String(valor).trim();
-  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  if (m) return m[1];
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso) return iso[1];
   const d = new Date(s.includes('T') ? s : `${s}T12:00:00`);
-  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  if (!Number.isNaN(d.getTime())) {
+    const y = d.getUTCFullYear();
+    const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${mo}-${day}`;
+  }
   return null;
 };
 

@@ -106,7 +106,16 @@ async function registrarPagoEnNube(conn, opts) {
       [prestamoId]
     );
     const pagadoAcumulado = Number(pagadoRows[0]?.total || 0);
-    const liq = calcularLiquidacionAnticipada(prestamo, new Date(), { pagadoAcumulado });
+    const [prorrogaRows] = await conn.execute(
+      `SELECT COUNT(*) AS n FROM Historial_Prorrogas
+       WHERE prestamo_id = ? AND deleted_at IS NULL`,
+      [prestamoId]
+    );
+    const prorrogasCount = Number(prorrogaRows[0]?.n || 0);
+    const liq = calcularLiquidacionAnticipada(prestamo, new Date(), {
+      pagadoAcumulado,
+      prorrogasCount,
+    });
     montoEfectivo = Number(liq.montoLiquidacion);
     if (!Number.isFinite(montoEfectivo) || montoEfectivo <= 0) {
       throw new Error('Este prestamo ya esta liquidado o sin saldo.');
@@ -221,9 +230,12 @@ async function recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId) {
 const TOLERANCIA_LIQUIDACION_PUSH = 2.5;
 
 /** Detecta liquidación en sync push (flag explícito o monto ≈ liquidación en nube). */
-function resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado) {
+function resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado, opts = {}) {
   const fechaRef = new Date(p.fecha_pago || new Date());
-  const liq = calcularLiquidacionAnticipada(prestamo, fechaRef, { pagadoAcumulado });
+  const liq = calcularLiquidacionAnticipada(prestamo, fechaRef, {
+    pagadoAcumulado,
+    prorrogasCount: opts.prorrogasCount,
+  });
   const montoCliente = Number(p.monto_pagado);
   const flagExplicito =
     p.tipo_cobro === 'liquidacion' ||

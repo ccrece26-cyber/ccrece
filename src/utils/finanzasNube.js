@@ -329,14 +329,28 @@ const calcularLiquidacionAnticipada = (prestamo, refDate = new Date(), opts = {}
   const vencimiento = fechaVencimientoCredito(
     prestamo.fecha_desembolso,
     plazo,
-    parseDiasCobro(prestamo.dias_de_cobro)
+    prestamo.dias_de_cobro,
+    {
+      periodicidad: prestamo.periodicidad,
+      tipo_frecuencia: prestamo.tipo_frecuencia || prestamo.periodicidad,
+    }
   );
   const vencido = prestamoEstaVencido(prestamo, refDate);
+  const { calcularInteresMoraVencido } = require('./moraVencido');
+  const mora = calcularInteresMoraVencido(prestamo, refDate, {
+    vencido,
+    fechaVencimiento: vencimiento,
+    prorrogasCount: opts.prorrogasCount,
+    sinProrroga: opts.sinProrroga,
+  });
 
   if (vencido) {
     let montoLiquidacion = saldoContrato;
     if (!Number.isFinite(montoLiquidacion) || montoLiquidacion <= 0) {
       montoLiquidacion = Math.max(0, saldo);
+    }
+    if (mora.aplica && mora.montoMora > 0) {
+      montoLiquidacion = Number((montoLiquidacion + mora.montoMora).toFixed(2));
     }
     return {
       capital,
@@ -350,7 +364,11 @@ const calcularLiquidacionAnticipada = (prestamo, refDate = new Date(), opts = {}
       esAnticipado: false,
       vencido: true,
       fechaVencimiento: vencimiento,
-      mensaje: `Crédito vencido (última visita ${vencimiento || '—'}): se cobra saldo con interés completo del contrato.`,
+      mora,
+      interesMora: mora.montoMora,
+      mensaje: mora.aplica
+        ? `Crédito vencido sin prórroga: saldo contrato + mora (${mora.semanasVencidas} sem.). Total: C$ ${montoLiquidacion.toFixed(2)}`
+        : `Crédito vencido (última visita ${vencimiento || '—'}): se cobra saldo con interés completo del contrato.`,
     };
   }
 
@@ -375,6 +393,8 @@ const calcularLiquidacionAnticipada = (prestamo, refDate = new Date(), opts = {}
     esAnticipado: true,
     vencido: false,
     fechaVencimiento: vencimiento,
+    mora: { aplica: false, montoMora: 0 },
+    interesMora: 0,
     mensaje:
       descuentoInteres > 0
         ? `Liquidación anticipada: interés por ${semUsadas} semana(s). Ahorro: C$ ${descuentoInteres.toFixed(2)}`

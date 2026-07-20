@@ -160,6 +160,7 @@ async function enriquecerPrestamosProrroga(rows) {
   const hoy = hoyISO();
   const ids = (rows || []).map((p) => p.id).filter(Boolean);
   const histMap = await cargarHistorialProrrogas(ids);
+  const { calcularInteresMoraVencido } = require('./moraVencido');
 
   return (rows || []).map((p) => {
     const dias = parseDias(p.dias_de_cobro);
@@ -171,8 +172,7 @@ async function enriquecerPrestamosProrroga(rows) {
     const vencido = !!(venc && hoy >= venc);
     const hist = histMap.get(p.id) || [];
     const semanas_prorroga_total = hist.reduce((s, h) => s + (Number(h.semanas_extra) || 0), 0);
-    // No esparcir Date crudos: JSON.stringify(Date) a veces llega mal al cliente.
-    return {
+    const base = {
       id: p.id,
       cliente_id: p.cliente_id,
       nombre_completo: p.nombre_completo,
@@ -196,6 +196,19 @@ async function enriquecerPrestamosProrroga(rows) {
       prorrogas_count: hist.length,
       semanas_prorroga_total,
       ultima_prorroga: hist[0] || null,
+    };
+    const mora = calcularInteresMoraVencido(base, new Date(), {
+      vencido,
+      fechaVencimiento: venc,
+      prorrogasCount: hist.length,
+    });
+    return {
+      ...base,
+      mora_aplica: mora.aplica,
+      interes_mora: mora.montoMora,
+      semanas_mora: mora.semanasVencidas,
+      saldo_con_mora: mora.aplica ? mora.saldoConMora : Number(p.saldo_pendiente),
+      mora_mensaje: mora.mensaje,
     };
   });
 }

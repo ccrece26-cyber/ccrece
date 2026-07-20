@@ -310,23 +310,32 @@ function resolverImportacionFinanciera(fila) {
   const total = fin.montoTotalPagar;
   const cuotasPorSemana = fila.dias_de_cobro.length || 1;
 
+  /**
+   * Prioridad (plantilla):
+   * 1) saldo_pendiente = lo que debe HOY (verdad)
+   * 2) monto_pagado_historico = total − saldo (se recalcula si no cuadra)
+   * semanas_pagadas solo estima si no hay saldo ni pagado.
+   */
   let saldo;
-  if (fila.saldo_pendiente != null && fila.saldo_pendiente >= 0) {
-    saldo = Number(Math.min(Math.max(0, fila.saldo_pendiente), total).toFixed(2));
+  let monto_pagado_historico;
+
+  const tieneSaldo = fila.saldo_pendiente != null && fila.saldo_pendiente >= 0;
+  const tienePagado = fila.monto_pagado_historico != null && fila.monto_pagado_historico >= 0;
+
+  if (tieneSaldo) {
+    saldo = Number(Math.min(Math.max(0, Number(fila.saldo_pendiente)), total).toFixed(2));
+    monto_pagado_historico = Number((total - saldo).toFixed(2));
+  } else if (tienePagado) {
+    monto_pagado_historico = Number(Math.min(Number(fila.monto_pagado_historico), total).toFixed(2));
+    saldo = Math.max(0, Number((total - monto_pagado_historico).toFixed(2)));
   } else if (fila.semanas_pagadas > 0) {
     const cuotasVirtuales = Math.min(agenda.length, fila.semanas_pagadas * cuotasPorSemana);
     const pagadoEst = Number((cuotasVirtuales * fin.cuotaPorDiaDeCobro).toFixed(2));
     saldo = Math.max(0, Number((total - pagadoEst).toFixed(2)));
+    monto_pagado_historico = Math.max(0, Number((total - saldo).toFixed(2)));
   } else {
     saldo = total;
-  }
-
-  let monto_pagado_historico;
-  if (fila.monto_pagado_historico != null && fila.monto_pagado_historico >= 0) {
-    monto_pagado_historico = Number(Math.min(fila.monto_pagado_historico, total).toFixed(2));
-    saldo = Math.max(0, Number((total - monto_pagado_historico).toFixed(2)));
-  } else {
-    monto_pagado_historico = Math.max(0, Number((total - saldo).toFixed(2)));
+    monto_pagado_historico = 0;
   }
 
   const fecha_ultimo_abono = fila.fecha_ultimo_abono || fila.fecha_desembolso;

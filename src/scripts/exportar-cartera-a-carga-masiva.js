@@ -7,7 +7,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env.nuevo') });
 const path = require('path');
 const XLSX = require('xlsx');
-const { parseTasaMensualInput } = require('../utils/finanzasNube');
+const { parseTasaMensualInput, calcularCuotaYDistribucion } = require('../utils/finanzasNube');
 const { normalizarCedula } = require('../utils/cedulaNic');
 const { PLANTILLA_COLUMNAS } = require('../utils/cargaMasivaPrestamos');
 
@@ -270,6 +270,40 @@ function filaACarga(row) {
     }
   }
 
+  const tasa_mensual = tasaMensualParaCarga(row);
+  const saldo_pendiente = Number(row.saldo_pendiente) || 0;
+  const monto_desembolsado = Number(row.monto_desembolsado) || 0;
+  // Pagado = total contrato − saldo (columna del Excel fuente suele no cuadrar).
+  let monto_pagado_historico = '';
+  if (monto_desembolsado > 0 && plazo > 0) {
+    try {
+      const diasArr = String(
+        tipo_frecuencia === 'DIAS_MES' ? diasMes || diasCobro : diasCobro
+      )
+        .split(/[,;|]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const fin = calcularCuotaYDistribucion(
+        monto_desembolsado,
+        plazo,
+        tipo_frecuencia === 'DIAS_MES' ? [1] : diasArr.length ? diasArr : ['LUNES'],
+        parseTasaMensualInput(tasa_mensual),
+        {
+          tipo_frecuencia,
+          dias_mes:
+            tipo_frecuencia === 'DIAS_MES'
+              ? diasArr.map((d) => Number(d)).filter((n) => n >= 1 && n <= 31)
+              : undefined,
+        }
+      );
+      const total = fin.montoTotalPagar;
+      const saldoCap = Math.min(Math.max(0, saldo_pendiente), total);
+      monto_pagado_historico = Number((total - saldoCap).toFixed(2));
+    } catch {
+      monto_pagado_historico = '';
+    }
+  }
+
   return {
     codigo_cliente,
     cedula,
@@ -283,18 +317,15 @@ function filaACarga(row) {
     direccion: row.direccion || '',
     actividad_economica: row.actividad_economica || '',
     cobrador_email: resolverCobrador(row),
-    monto_desembolsado: Number(row.monto_desembolsado) || 0,
+    monto_desembolsado,
     plazo_semanas: plazo,
-    tasa_mensual: tasaMensualParaCarga(row),
+    tasa_mensual,
     tipo_frecuencia,
     dias_cobro: tipo_frecuencia === 'DIAS_MES' ? '' : diasCobro,
     dias_mes: tipo_frecuencia === 'DIAS_MES' ? diasMes || diasCobro : '',
     fecha_desembolso: fechaISO(row.fecha_desembolso),
-    saldo_pendiente: Number(row.saldo_pendiente) || 0,
-    monto_pagado_historico:
-      row.monto_pagado_historico !== '' && row.monto_pagado_historico != null
-        ? Number(row.monto_pagado_historico)
-        : '',
+    saldo_pendiente,
+    monto_pagado_historico,
     fecha_ultimo_abono: fechaISO(row.fecha_ultimo_abono),
     semanas_pagadas,
     latitud: row.latitud !== '' && row.latitud != null ? Number(row.latitud) : '',

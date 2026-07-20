@@ -45,6 +45,9 @@ const {
   listarHistorialAnticipos,
   revertirAnticipo,
   corregirAnticipo,
+  listarCuotasPendientesSinHistorial,
+  listarCuotasPendientesPrestamo,
+  ajustarFechaCuota,
   fechaISO: fechaFeriadoISO,
 } = require('../utils/feriados');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
@@ -2333,6 +2336,48 @@ async function corregirAnticipoAdmin(req, res) {
   }
 }
 
+async function listAnticiposSinHistorial(req, res) {
+  try {
+    const data = await listarCuotasPendientesSinHistorial({ limit: req.query.limit });
+    return res.json({
+      success: true,
+      data,
+      mensaje:
+        'Cuotas pendientes en fecha fuera del día habitual y sin registro de anticipo (pueden ser anticipos viejos o movidas por feriado).',
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function listCuotasPendientesPrestamo(req, res) {
+  try {
+    const data = await listarCuotasPendientesPrestamo(req.params.id);
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function ajustarFechaCuotaAdmin(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await ajustarFechaCuota(conn, req.params.id, req.body.fecha_cobro, {
+      operador_id: req.operadorId,
+      comentario: req.body.comentario || 'Ajuste manual (anticipo previo o corrección)',
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 async function castigarPerdida(req, res) {
   const conn = await getConnection();
   try {
@@ -2458,6 +2503,9 @@ module.exports = {
   listAnticipos,
   revertirAnticipoAdmin,
   corregirAnticipoAdmin,
+  listAnticiposSinHistorial,
+  listCuotasPendientesPrestamo,
+  ajustarFechaCuotaAdmin,
   castigarPerdida,
   exportCarteraImportacion,
   esIdClienteOficial,

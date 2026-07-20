@@ -390,6 +390,191 @@ async function corregirAnticipo(conn, anticipoId, nuevaFecha, opts = {}) {
   };
 }
 
+const MAPA_WD = ['DOMINGO', 'LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'];
+
+function normalizarDiaNombre(d) {
+  return String(d || '')
+    .toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function cuotaFueraDeAgenda(fecha, diasRaw, periodicidad) {
+  const f = fechaISO(fecha);
+  if (!f) return false;
+  try {
+    const dias = typeof diasRaw === 'string' ? JSON.parse(diasRaw) : diasRaw;
+    if (!Array.isArray(dias) || !dias.length) return false;
+    const nums = dias.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 31);
+    const esMes =
+      String(periodicidad || '').toUpperCase() === 'DIAS_MES' ||
+      (nums.length === dias.length && nums.length > 0);
+    if (esMes) {
+      const dayNum = Number(f.slice(8, 10));
+      return !nums.includes(dayNum);
+    }
+    const wd = MAPA_WD[new Date(`${f}T12:00:00`).getDay()];
+    return !dias.some((d) => normalizarDiaNombre(d) === normalizarDiaNombre(wd));
+  } catch {
+    return false;
+  }
+}
+
+/** Cuotas pendientes sin registro en historial (p.ej. anticipos antes del módulo). */
+async function listarCuotasPendientesSinHistorial(opts = {}) {
+  await ensureHistorialAnticiposTable();
+  const limit = Math.min(100, Number(opts.limit) || 60);
+  const rows = await query(
+    `SELECT cc.id AS cuota_id, cc.prestamo_id, cc.fecha_programada, cc.monto_programado,
+            cc.monto_pagado, cc.estado AS estado_cuota,
+            p.dias_de_cobro, p.periodicidad, p.saldo_pendiente, p.cuota_semanal_base,
+            c.nombre_completo, c.cedula, c.id AS cliente_id
+     FROM Cuotas_Calendario cc
+     INNER JOIN Prestamos p ON p.id = cc.prestamo_id AND p.deleted_at IS NULL AND p.estado = 'Activo'
+     INNER JOIN Clientes c ON c.id = p.cliente_id AND c.deleted_at IS NULL
+     LEFT JOIN Historial_Anticipos h
+       ON h.cuota_id = cc.id AND h.estado = 'Activo' AND h.deleted_at IS NULL
+     WHERE cc.deleted_at IS NULL
+       AND cc.estado IN ('Programada', 'Parcial')
+       AND h.id IS NULL
+       AND cc.fecha_programada >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       AND cc.fecha_programada <= DATE_ADD(CURDATE(), INTERVAL 45 DAY)
+     ORDER BY cc.fecha_programada ASC
+     LIMIT ${limit * 3}`
+  );
+
+  const fuera = [];
+  for (const r of rows || []) {
+    const fecha = fechaISO(r.fecha_programada);
+    if (!cuotaFueraDeAgenda(fecha, r.dias_de_cobro, r.periodicidad)) continue;
+    fuera.push({
+      cuota_id: r.cuota_id,
+      prestamo_id: r.prestamo_id,
+      cliente_id: r.cliente_id,
+      nombre_completo: r.nombre_completo,
+      cedula: r.cedula,
+      fecha_programada: fecha,
+      monto_pendiente: Math.max(
+        0,
+        Number((Number(r.monto_programado) - Number(r.monto_pagado || 0)).toFixed(2))
+      ),
+      estado_cuota: r.estado_cuota,
+      dias_de_cobro: r.dias_de_cobro,
+      periodicidad: r.periodicidad || 'SEMANAL',
+      sin_historial: true,
+    });
+    if (fuera.length >= limit) break;
+  }
+  return fuera;
+}
+
+async function listarCuotasPendientesPrestamo(prestamoId) {
+  const rows = await query(
+    `SELECT cc.id AS cuota_id, cc.prestamo_id, cc.fecha_programada, cc.monto_programado,
+            cc.monto_pagado, cc.estado AS estado_cuota,
+            p.dias_de_cobro, p.periodicidad,
+            c.nombre_completo, c.cedula, c.id AS cliente_id,
+            (SELECT h.id FROM Historial_Anticipos h
+             WHERE h.cuota_id = cc.id AND h.estado = 'Activo' AND h.deleted_at IS NULL
+             LIMIT 1) AS anticipo_id
+     FROM Cuotas_Calendario cc
+     INNER JOIN Prestamos p ON p.id = cc.prestamo_id
+     INNER JOIN Clientes c ON c.id = p.cliente_id
+     WHERE cc.prestamo_id = ? AND cc.deleted_at IS NULL
+       AND cc.estado IN ('Programada', 'Parcial')
+     ORDER BY cc.fecha_programada ASC
+     LIMIT 24`,
+    [prestamoId]
+  );
+  return (rows || []).map((r) => {
+    const fecha = fechaISO(r.fecha_programada);
+    return {
+      cuota_id: r.cuota_id,
+      prestamo_id: r.prestamo_id,
+      cliente_id: r.cliente_id,
+      nombre_completo: r.nombre_completo,
+      cedula: r.cedula,
+      fecha_programada: fecha,
+      monto_pendiente: Math.max(
+        0,
+        Number((Number(r.monto_programado) - Number(r.monto_pagado || 0)).toFixed(2))
+      ),
+      estado_cuota: r.estado_cuota,
+      anticipo_id: r.anticipo_id || null,
+      fuera_de_agenda: cuotaFueraDeAgenda(fecha, r.dias_de_cobro, r.periodicidad),
+    };
+  });
+}
+
+/**
+ * Ajusta fecha de una cuota (útil para anticipos previos al historial).
+ * Registra en Historial_Anticipos para poder revertir después.
+ */
+async function ajustarFechaCuota(conn, cuotaId, nuevaFecha, opts = {}) {
+  await ensureHistorialAnticiposTable(conn);
+  const destino = fechaISO(nuevaFecha);
+  if (!destino) throw new Error('Fecha inválida');
+
+  const [rows] = await conn.execute(
+    `SELECT cc.*, p.estado AS estado_prestamo
+     FROM Cuotas_Calendario cc
+     INNER JOIN Prestamos p ON p.id = cc.prestamo_id
+     WHERE cc.id = ? AND cc.deleted_at IS NULL LIMIT 1`,
+    [cuotaId]
+  );
+  const cuota = rows[0];
+  if (!cuota) throw new Error('Cuota no encontrada');
+  if (cuota.estado_prestamo !== 'Activo') throw new Error('El préstamo no está activo');
+  if (!['Programada', 'Parcial'].includes(cuota.estado)) {
+    throw new Error('La cuota ya fue cobrada; no se puede cambiar la fecha');
+  }
+
+  const fechaAntes = fechaISO(cuota.fecha_programada);
+  if (fechaAntes === destino) throw new Error('Es la misma fecha');
+
+  await conn.execute(
+    `UPDATE Cuotas_Calendario
+     SET fecha_programada = ?, updated_at = NOW(), is_synced = 1
+     WHERE id = ?`,
+    [destino, cuotaId]
+  );
+
+  await conn.execute(
+    `UPDATE Historial_Anticipos
+     SET estado = 'Reemplazado', updated_at = NOW()
+     WHERE cuota_id = ? AND estado = 'Activo' AND deleted_at IS NULL`,
+    [cuotaId]
+  );
+
+  const { v4: uuidv4 } = require('uuid');
+  const histId = uuidv4();
+  // fecha_original = a dónde podría volver (la que tenía); fecha_anticipo = nueva
+  await conn.execute(
+    `INSERT INTO Historial_Anticipos
+       (id, prestamo_id, cuota_id, fecha_original, fecha_anticipo, monto_programado, operador_id, estado, comentario)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'Activo', ?)`,
+    [
+      histId,
+      cuota.prestamo_id,
+      cuotaId,
+      fechaAntes,
+      destino,
+      Number(cuota.monto_programado),
+      opts.operador_id || null,
+      opts.comentario || 'Ajuste manual de fecha de cuota',
+    ]
+  );
+
+  return {
+    id: histId,
+    cuota_id: cuotaId,
+    prestamo_id: cuota.prestamo_id,
+    fecha_antes: fechaAntes,
+    fecha_cobro: destino,
+    mensaje: `Cuota movida de ${fechaAntes} a ${destino}. Ya aparece en el historial para revertir si hace falta.`,
+  };
+}
+
 module.exports = {
   ensureFeriadosTable,
   ensureHistorialAnticiposTable,
@@ -402,6 +587,9 @@ module.exports = {
   listarHistorialAnticipos,
   revertirAnticipo,
   corregirAnticipo,
+  listarCuotasPendientesSinHistorial,
+  listarCuotasPendientesPrestamo,
+  ajustarFechaCuota,
   fechaISO,
   addDaysISO,
 };

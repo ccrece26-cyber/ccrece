@@ -36,6 +36,7 @@ const {
 const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
+const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos, enriquecerPrestamosProrroga } = require('../utils/reporteVencidos');
@@ -2148,6 +2149,30 @@ async function aplicarProrroga(req, res) {
   }
 }
 
+/** Prórroga y/o perdón de saldo (negociación admin, sin mora automática). */
+async function negociarCredito(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await aplicarNegociacionVencido(conn, {
+      prestamo_id: req.body.prestamo_id,
+      monto_perdonado: req.body.monto_perdonado,
+      nuevo_saldo: req.body.nuevo_saldo,
+      semanas_extra: req.body.semanas_extra,
+      comentario: req.body.comentario || '',
+      operador_id: req.operadorId,
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 async function castigarPerdida(req, res) {
   const conn = await getConnection();
   try {
@@ -2265,6 +2290,7 @@ module.exports = {
   listGarantiasPrestamo,
   agregarGarantiasPrestamo,
   aplicarProrroga,
+  negociarCredito,
   castigarPerdida,
   exportCarteraImportacion,
   esIdClienteOficial,

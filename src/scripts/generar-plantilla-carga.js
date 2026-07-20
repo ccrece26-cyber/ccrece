@@ -11,6 +11,7 @@ const XLSX = require('xlsx');
 const { query, pool } = require('../config/db');
 
 const COLUMNAS = [
+  'codigo_cliente',
   'cedula',
   'documento_tipo',
   'primer_nombre',
@@ -39,6 +40,10 @@ const COLUMNAS = [
 ];
 
 const INSTRUCCIONES = [
+  {
+    campo: 'codigo_cliente',
+    nota: 'Opcional. 5 o CC-5 → id CC-5 (numeración del Excel original). Tras la carga, nuevos siguen en max+1.',
+  },
   {
     campo: 'cedula',
     nota: 'Opcional. Nacional: 13 dígitos + letra (ej. 0011208760015A), puede /2. Vacío → SINDOC-{código}. Extranjero: cualquier doc.',
@@ -69,6 +74,7 @@ const INSTRUCCIONES = [
 
 const FILAS_EJEMPLO = [
   {
+    codigo_cliente: 'CC-1',
     cedula: '0011208760015A',
     documento_tipo: 'nacional',
     primer_nombre: 'Maria',
@@ -92,6 +98,7 @@ const FILAS_EJEMPLO = [
     orden_visita: 1,
   },
   {
+    codigo_cliente: 'CC-2',
     cedula: 'PASSPORT-HX9912',
     documento_tipo: 'extranjero',
     primer_nombre: 'John',
@@ -113,6 +120,7 @@ const FILAS_EJEMPLO = [
     orden_visita: 2,
   },
   {
+    codigo_cliente: '3',
     cedula: '',
     documento_tipo: 'nacional',
     primer_nombre: 'Ana',

@@ -51,6 +51,36 @@ async function reserveClienteIds(conn, count) {
   return ids;
 }
 
+/**
+ * Asegura que SEC_CLIENTE >= minVal (p. ej. tras importar CC-1..CC-252,
+ * los nuevos clientes empiezan en CC-253).
+ */
+async function asegurarSecuenciaAlMenos(conn, minVal) {
+  const min = Math.max(0, Math.floor(Number(minVal) || 0));
+  if (!min) return;
+  await conn.execute(
+    `INSERT INTO Parametros_Globales (id, clave, valor, descripcion, is_synced)
+     VALUES (?, 'SEC_CLIENTE', ?, 'Secuencia clientes CC-N', 1)
+     ON DUPLICATE KEY UPDATE valor = GREATEST(CAST(valor AS UNSIGNED), ?)`,
+    [uuidv4(), String(min), min]
+  );
+}
+
+/**
+ * Acepta: 5 | "5" | "CC-5" | "cc-5" → { id: "CC-5", n: 5 }
+ * Vacío → null
+ */
+function parseCodigoCliente(raw) {
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim().toUpperCase();
+  if (!s) return null;
+  const m = s.match(/^CC-?(\d+)$/) || s.match(/^(\d+)$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return { id: `CC-${n}`, n };
+}
+
 function esIdClienteOficial(id) {
   return /^CC-\d+$/.test(id || '');
 }
@@ -60,6 +90,8 @@ module.exports = {
   reserveClienteIds,
   bumpSecuenciaCliente,
   initSecuenciaCliente,
+  asegurarSecuenciaAlMenos,
+  parseCodigoCliente,
   esIdClienteOficial,
   obtenerMaxSecuencia,
 };

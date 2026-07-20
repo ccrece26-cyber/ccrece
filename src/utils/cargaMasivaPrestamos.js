@@ -13,7 +13,7 @@ function parseDocumentoTipo(raw) {
   if (t === 'extranjero' || t === 'ext' || t === 'foreign' || t === 'e') return 'extranjero';
   return 'nacional';
 }
-const { reserveClienteIds, initSecuenciaCliente } = require('./clienteId');
+const { reserveClienteIds, initSecuenciaCliente, parseCodigoCliente, asegurarSecuenciaAlMenos } = require('./clienteId');
 const { insertMany, updateManyById } = require('./bulkSql');
 const { aplicarMontoACuotas, recalcularSaldoPrestamoDesdeCuotas } = require('./registrarPagoNube');
 const {
@@ -156,6 +156,9 @@ function normalizarFila(raw, indice) {
   );
   const valCed = validarCedula(txt(src.cedula), { tipo: documento_tipo, requerido: false });
   const cedula = valCed.cedula || null;
+  const codigoParsed = parseCodigoCliente(
+    src.codigo_cliente ?? src.cliente_id ?? src.no ?? src.numero ?? src.numero_cliente
+  );
   const cobrador_email = txt(src.cobrador_email || src.email_cobrador);
   const cobrador_id = txt(src.cobrador_id || src.id_cobrador);
 
@@ -199,6 +202,8 @@ function normalizarFila(raw, indice) {
   return {
     _fila: indice + 1,
     cedula,
+    codigo_cliente: codigoParsed ? codigoParsed.id : null,
+    codigo_cliente_n: codigoParsed ? codigoParsed.n : null,
     documento_tipo,
     primer_nombre,
     segundo_nombre,
@@ -481,6 +486,7 @@ async function validarFilas(filasRaw, queryFn) {
   const validas = [];
   const errores = [];
   const cedulasVistas = new Map();
+  const codigosVistos = new Map();
 
   for (let i = 0; i < filasRaw.length; i += 1) {
     const raw = filasRaw[i];
@@ -507,6 +513,19 @@ async function validarFilas(filasRaw, queryFn) {
       cedulasVistas.set(fila.cedula, fila._fila);
     }
 
+    if (fila.codigo_cliente) {
+      const prevC = codigosVistos.get(fila.codigo_cliente);
+      if (prevC != null) {
+        errores.push({
+          fila: fila._fila,
+          cedula: fila.cedula,
+          errores: [`codigo_cliente ${fila.codigo_cliente} duplicado (ya en fila ${prevC})`],
+        });
+        continue;
+      }
+      codigosVistos.set(fila.codigo_cliente, fila._fila);
+    }
+
     const cobrador = resolverCobrador(fila, mapa);
     if (!cobrador) {
       errores.push({
@@ -526,6 +545,7 @@ async function validarFilas(filasRaw, queryFn) {
     validas.push({
       fila: fila._fila,
       cedula: fila.cedula,
+      codigo_cliente: fila.codigo_cliente,
       documento_tipo: fila.documento_tipo,
       nombre_completo: fila.nombre_completo,
       cobrador: cobrador.nombre_completo,
@@ -695,14 +715,70 @@ async function insertarCuotasBulk(conn, cuotasRows) {
   );
 }
 
+async function precargarIdsCliente(conn, ids) {
+  const map = new Set();
+  const list = [...new Set((ids || []).filter(Boolean))];
+  if (!list.length) return map;
+  const CHUNK = 100;
+  for (let i = 0; i < list.length; i += CHUNK) {
+    const slice = list.slice(i, i + CHUNK);
+    const ph = slice.map(() => '?').join(',');
+    const [rows] = await conn.execute(
+      `SELECT id FROM Clientes WHERE id IN (${ph}) AND deleted_at IS NULL`,
+      slice
+    );
+    for (const r of rows) map.add(r.id);
+  }
+  return map;
+}
+
 async function importarFilasEnLote(conn, preparadas, mapa) {
   const cedulaMap = await precargarCedulas(
     conn,
     preparadas.map((p) => p.cedula).filter(Boolean)
   );
-  const nuevos = preparadas.filter((p) => !p.cedula || !cedulaMap.has(p.cedula)).length;
-  const newIds = await reserveClienteIds(conn, nuevos);
+
+  // Nuevos = sin cédula conocida en BD
+  const filasNuevas = preparadas.filter((p) => !p.cedula || !cedulaMap.has(p.cedula));
+  const conCodigo = filasNuevas.filter((p) => p.codigo_cliente);
+  const sinCodigo = filasNuevas.filter((p) => !p.codigo_cliente);
+
+  // Validar que códigos explícitos no existan ya
+  const idsExplicitos = conCodigo.map((p) => p.codigo_cliente);
+  const existentesIds = await precargarIdsCliente(conn, idsExplicitos);
+  for (const fila of conCodigo) {
+    if (existentesIds.has(fila.codigo_cliente)) {
+      throw new Error(
+        `codigo_cliente ${fila.codigo_cliente} ya existe (fila ${fila._fila}, ${fila.nombre_completo || fila.cedula || ''})`
+      );
+    }
+  }
+  // Duplicados entre códigos del lote
+  const seenCod = new Set();
+  for (const fila of conCodigo) {
+    if (seenCod.has(fila.codigo_cliente)) {
+      throw new Error(`codigo_cliente duplicado en archivo: ${fila.codigo_cliente}`);
+    }
+    seenCod.add(fila.codigo_cliente);
+  }
+
+  const maxExplicit = conCodigo.reduce((m, p) => Math.max(m, p.codigo_cliente_n || 0), 0);
+  if (maxExplicit > 0) {
+    await asegurarSecuenciaAlMenos(conn, maxExplicit);
+  }
+
+  const newIds = await reserveClienteIds(conn, sinCodigo.length);
   let newIdIdx = 0;
+
+  // Asignar id previsto a cada fila nueva
+  const idPrevisto = new Map(); // key fila index or object → id
+  for (const fila of conCodigo) {
+    idPrevisto.set(fila, fila.codigo_cliente);
+  }
+  for (const fila of sinCodigo) {
+    idPrevisto.set(fila, newIds[newIdIdx]);
+    newIdIdx += 1;
+  }
 
   const cobIds = [...new Set(preparadas.map((p) => p.cobrador_id))];
   const rutaCache = await precargarRutas(conn, cobIds, mapa);
@@ -711,12 +787,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
   const clienteIdsPrevistos = [];
   for (const fila of preparadas) {
     const existing = fila.cedula ? cedulaMap.get(fila.cedula) : null;
-    if (existing) {
-      clienteIdsPrevistos.push(existing);
-    } else {
-      clienteIdsPrevistos.push(newIds[newIdIdx]);
-      newIdIdx += 1;
-    }
+    if (existing) clienteIdsPrevistos.push(existing);
+    else clienteIdsPrevistos.push(idPrevisto.get(fila));
   }
   const activos = await precargarClientesConCreditoActivo(conn, clienteIdsPrevistos);
   for (const fila of preparadas) {
@@ -727,7 +799,6 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     }
   }
 
-  newIdIdx = 0;
   const clientesInsert = [];
   const clientesUpdate = [];
   const prestamosInsert = [];
@@ -736,6 +807,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
   const pendientesPago = [];
   const exitos = [];
   const prestamoIds = [];
+  let maxUsado = maxExplicit;
 
   for (const fila of preparadas) {
     const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico, fecha_ultimo_abono } =
@@ -761,8 +833,10 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         cobrador_id: fila.cobrador_id,
       });
     } else {
-      clienteId = newIds[newIdIdx];
-      newIdIdx += 1;
+      clienteId = idPrevisto.get(fila);
+      if (!clienteId) throw new Error(`Sin id de cliente para fila ${fila._fila}`);
+      const nMatch = String(clienteId).match(/^CC-(\d+)$/);
+      if (nMatch) maxUsado = Math.max(maxUsado, parseInt(nMatch[1], 10));
       const cedulaFinal = fila.cedula || codigoSinDocumento(clienteId);
       if (fila.cedula) cedulaMap.set(fila.cedula, clienteId);
       clienteNuevo = true;
@@ -828,6 +902,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     const item = {
       fila: fila._fila,
       cedula: fila.cedula || codigoSinDocumento(clienteId),
+      codigo_cliente: clienteId,
       documento_tipo,
       cliente_id: clienteId,
       prestamo_id: prestamoId,
@@ -840,6 +915,10 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     };
     pendientesPago.push(item);
     exitos.push(item);
+  }
+
+  if (maxUsado > 0) {
+    await asegurarSecuenciaAlMenos(conn, maxUsado);
   }
 
   if (clientesInsert.length) {
@@ -1229,6 +1308,7 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
   const preparadas = [];
   const erroresPrev = [];
   const cedulasVistas = new Set();
+  const codigosVistos = new Set();
 
   for (let i = 0; i < filasRaw.length; i += 1) {
     const raw = filasRaw[i];
@@ -1249,6 +1329,15 @@ async function importarFilas(filasRaw, queryFn, getConnection, opciones = {}) {
       continue;
     }
     if (fila.cedula) cedulasVistas.add(fila.cedula);
+    if (fila.codigo_cliente && codigosVistos.has(fila.codigo_cliente)) {
+      erroresPrev.push({
+        fila: fila._fila,
+        cedula: fila.cedula,
+        error: `codigo_cliente duplicado: ${fila.codigo_cliente}`,
+      });
+      continue;
+    }
+    if (fila.codigo_cliente) codigosVistos.add(fila.codigo_cliente);
     const cobrador = resolverCobrador(fila, mapa);
     if (!cobrador) {
       erroresPrev.push({ fila: fila._fila, cedula: fila.cedula, error: 'Cobrador no encontrado' });
@@ -1313,6 +1402,7 @@ module.exports = {
   resolverImportacionFinanciera,
   calcularPreview,
   PLANTILLA_COLUMNAS: [
+    'codigo_cliente',
     'cedula',
     'documento_tipo',
     'primer_nombre',

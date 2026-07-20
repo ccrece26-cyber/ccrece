@@ -54,7 +54,7 @@ async function validarFilas(filas, query) {
 
     if (!fila.cedula) errs.push('Cédula requerida');
     else {
-      const v = validarCedula(fila.cedula);
+      const v = validarCedula(fila.cedula, { requerido: false });
       if (!v.ok) errs.push(v.error);
       else fila.cedula = v.cedula;
     }
@@ -105,8 +105,8 @@ async function importarFilas(filas, query, getConnection) {
       try {
         const fila = normalizarFila(filas[i]);
         if (esFilaEjemploGarantia(fila.cedula)) continue;
-        const valCed = validarCedula(fila.cedula);
-        if (!valCed.ok) throw new Error(valCed.error);
+        const valCed = validarCedula(fila.cedula, { requerido: false });
+        if (!valCed.ok || !valCed.cedula) throw new Error(valCed.error || 'Cédula requerida');
         if (!fila.tipo_articulo) throw new Error('tipo_articulo requerido');
         if (fila.valor_estimado == null || fila.valor_estimado < 0) {
           throw new Error('valor_estimado inválido');

@@ -213,9 +213,9 @@ function normalizarFila(raw, indice) {
 
 function validarFilaCampos(fila) {
   const errores = [];
-  if (!fila.cedula) errores.push('Cedula requerida');
+  if (!fila.cedula) errores.push('Cedula requerida en carga masiva (identifica al cliente)');
   else {
-    const v = validarCedula(fila.cedula);
+    const v = validarCedula(fila.cedula, { requerido: false });
     if (!v.ok) errores.push(v.error);
   }
   if (!fila.nombre_completo) errores.push('Nombre requerido (nombre_completo o primer_nombre + primer_apellido)');

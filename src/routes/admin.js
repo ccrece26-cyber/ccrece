@@ -33,7 +33,7 @@ const {
   validarFilas: validarFilasGarantias,
   importarFilas: importarFilasGarantias,
 } = require('../utils/cargaMasivaGarantias');
-const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
+const { normalizarCedula, validarCedula, codigoSinDocumento } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
@@ -43,6 +43,8 @@ const {
   moverCuotasDeFeriado,
   anticiparCuotaPrestamo,
   listarHistorialAnticipos,
+  listarDiasConRegistroAnticipos,
+  registrarHistorialRetroactivo,
   revertirAnticipo,
   corregirAnticipo,
   listarCuotasPendientesSinHistorial,
@@ -71,6 +73,7 @@ const camposCliente = (c) => ({
   segundo_apellido: c.segundo_apellido || null,
   nombre_completo: nombreCompleto(c),
   cedula: normalizarCedula(c.cedula) || null,
+  documento_tipo: c.documento_tipo === 'extranjero' ? 'extranjero' : 'nacional',
   telefono: c.telefono || null,
   direccion: c.direccion || null,
   actividad_economica: c.actividad_economica || null,
@@ -156,23 +159,23 @@ async function createCliente(req, res) {
   const conn = await getConnection();
   try {
     const c = camposCliente(req.body);
-    if (!c.cedula || !c.nombre_completo) {
-      return res.status(400).json({ success: false, message: 'Cédula y nombre requeridos.' });
+    if (!c.nombre_completo) {
+      return res.status(400).json({ success: false, message: 'Nombre requerido.' });
     }
-    const valCed = validarCedula(c.cedula);
+    const valCed = validarCedula(c.cedula, { tipo: c.documento_tipo, requerido: false });
     if (!valCed.ok) return res.status(400).json({ success: false, message: valCed.error });
-    c.cedula = valCed.cedula;
     await conn.beginTransaction();
     const id = await nextClienteId(conn);
+    c.cedula = valCed.cedula || codigoSinDocumento(id);
     await conn.execute(
       `INSERT INTO Clientes (
         id, primer_nombre, segundo_nombre, primer_apellido, segundo_apellido,
-        nombre_completo, cedula, telefono, direccion, actividad_economica,
+        nombre_completo, cedula, documento_tipo, telefono, direccion, actividad_economica,
         latitud, longitud, latitud_cobro, longitud_cobro, cobrador_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [
         id, c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
-        c.nombre_completo, c.cedula, c.telefono, c.direccion, c.actividad_economica,
+        c.nombre_completo, c.cedula, c.documento_tipo, c.telefono, c.direccion, c.actividad_economica,
         c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro, c.cobrador_id,
       ]
     );
@@ -206,22 +209,21 @@ async function updateCliente(req, res) {
   try {
     const { id } = req.params;
     const c = camposCliente(req.body);
-    if (c.cedula) {
-      const valCed = validarCedula(c.cedula);
-      if (!valCed.ok) return res.status(400).json({ success: false, message: valCed.error });
-      c.cedula = valCed.cedula;
-    }
+    const valCed = validarCedula(c.cedula, { tipo: c.documento_tipo, requerido: false });
+    if (!valCed.ok) return res.status(400).json({ success: false, message: valCed.error });
+    c.cedula = valCed.cedula || codigoSinDocumento(id);
     await query(
       `UPDATE Clientes SET
         primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
-        nombre_completo = ?, cedula = ?, telefono = ?, direccion = ?, actividad_economica = ?,
+        nombre_completo = ?, cedula = ?, documento_tipo = COALESCE(?, documento_tipo),
+        telefono = ?, direccion = ?, actividad_economica = ?,
         latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
         latitud_cobro = COALESCE(?, latitud_cobro), longitud_cobro = COALESCE(?, longitud_cobro),
         cobrador_id = ?, updated_at = NOW()
        WHERE id = ? AND deleted_at IS NULL`,
       [
         c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,
-        c.nombre_completo, c.cedula, c.telefono, c.direccion, c.actividad_economica,
+        c.nombre_completo, c.cedula, c.documento_tipo, c.telefono, c.direccion, c.actividad_economica,
         c.latitud, c.longitud, c.latitud_cobro, c.longitud_cobro, c.cobrador_id, id,
       ]
     );
@@ -2293,10 +2295,43 @@ async function listAnticipos(req, res) {
     const data = await listarHistorialAnticipos({
       solo_activos: solo,
       limit: req.query.limit,
+      fecha_registro: req.query.fecha_registro || null,
     });
+    return res.json({ success: true, data, fecha_registro: req.query.fecha_registro || null });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function listAnticiposDiasRegistro(req, res) {
+  try {
+    const data = await listarDiasConRegistroAnticipos({ dias: req.query.dias });
     return res.json({ success: true, data });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function backfillHistorialAnticipo(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await registrarHistorialRetroactivo(conn, {
+      cuota_id: req.body.cuota_id,
+      fecha_original: req.body.fecha_original,
+      fecha_anticipo: req.body.fecha_anticipo,
+      operador_id: req.operadorId,
+      comentario: req.body.comentario,
+      created_at: req.body.created_at,
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
   }
 }
 
@@ -2501,6 +2536,8 @@ module.exports = {
   deleteFeriado,
   anticiparCobro,
   listAnticipos,
+  listAnticiposDiasRegistro,
+  backfillHistorialAnticipo,
   revertirAnticipoAdmin,
   corregirAnticipoAdmin,
   listAnticiposSinHistorial,

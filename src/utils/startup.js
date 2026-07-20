@@ -35,6 +35,8 @@ async function migrarTablasSync() {
     'ALTER TABLE Clientes ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP',
     'ALTER TABLE Clientes ADD COLUMN latitud_cobro DOUBLE DEFAULT NULL',
     'ALTER TABLE Clientes ADD COLUMN longitud_cobro DOUBLE DEFAULT NULL',
+    'ALTER TABLE Clientes ADD COLUMN documento_tipo VARCHAR(20) DEFAULT NULL',
+    'ALTER TABLE Clientes MODIFY COLUMN cedula VARCHAR(40) NOT NULL',
     'ALTER TABLE Usuarios ADD COLUMN expo_push_token VARCHAR(255) DEFAULT NULL',
     'ALTER TABLE Usuarios ADD COLUMN push_token_at DATETIME DEFAULT NULL',
     `CREATE TABLE IF NOT EXISTS Solicitudes_Correccion_Cobro (

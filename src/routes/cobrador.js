@@ -2,7 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { query, getConnection } = require('../config/db');
 const { leerParametrosFinancieros } = require('../utils/parametrosFinancieros');
 const { nombreCompleto } = require('../utils/cliente');
-const { normalizarCedula, validarCedula } = require('../utils/cedulaNic');
+const { normalizarCedula, validarCedula, codigoSinDocumento, esCodigoSinDocumento } = require('../utils/cedulaNic');
 const { nextClienteId, esIdClienteOficial, initSecuenciaCliente } = require('../utils/clienteId');
 const {
   diaCobroHoy,
@@ -389,8 +389,8 @@ async function resolverClienteIdEnNube(conn, localId, idMapClientes, { cedula, c
     if (r.length) return r[0].id;
   }
   if (cedula) {
-    const val = validarCedula(cedula);
-    if (val.ok) {
+    const val = validarCedula(cedula, { requerido: false });
+    if (val.ok && val.cedula && !esCodigoSinDocumento(val.cedula)) {
       const [r] = await conn.execute(
         'SELECT id FROM Clientes WHERE cedula = ? AND deleted_at IS NULL LIMIT 1',
         [val.cedula]
@@ -537,12 +537,12 @@ async function pushSync(req, res) {
 
     for (const c of clientes) {
       try {
-        const valCed = validarCedula(c.cedula);
+        const tipoDoc = c.documento_tipo === 'extranjero' ? 'extranjero' : 'nacional';
+        const valCed = validarCedula(c.cedula, { tipo: tipoDoc, requerido: false });
         if (!valCed.ok) {
           errores.push({ tipo: 'cliente', id: c.id, error: valCed.error });
           continue;
         }
-        c.cedula = valCed.cedula;
         const nc = nombreCompleto(c);
         let cobId = c.cobrador_id || cobradorId || null;
         if (cobId) {
@@ -553,17 +553,26 @@ async function pushSync(req, res) {
           if (!cobOk.length) cobId = null;
         }
 
-        const [byCedula] = await conn.execute('SELECT id FROM Clientes WHERE cedula = ? LIMIT 1', [c.cedula]);
         const [byId] = c.id
           ? await conn.execute('SELECT id FROM Clientes WHERE id = ? LIMIT 1', [c.id])
           : [[]];
 
+        let byCedula = [];
+        if (valCed.cedula && !esCodigoSinDocumento(valCed.cedula)) {
+          const [rowsCed] = await conn.execute('SELECT id FROM Clientes WHERE cedula = ? LIMIT 1', [
+            valCed.cedula,
+          ]);
+          byCedula = rowsCed;
+        }
+
         if (byCedula.length || byId.length) {
           const cloudId = byCedula[0]?.id || byId[0]?.id;
+          const cedulaFinal = valCed.cedula || codigoSinDocumento(cloudId);
           await conn.execute(
             `UPDATE Clientes SET
               primer_nombre = ?, segundo_nombre = ?, primer_apellido = ?, segundo_apellido = ?,
-              nombre_completo = ?, telefono = ?, direccion = ?, actividad_economica = ?,
+              nombre_completo = ?, cedula = ?, documento_tipo = ?, telefono = ?, direccion = ?,
+              actividad_economica = ?,
               latitud = COALESCE(?, latitud), longitud = COALESCE(?, longitud),
               latitud_cobro = COALESCE(?, latitud_cobro), longitud_cobro = COALESCE(?, longitud_cobro),
               cobrador_id = COALESCE(?, cobrador_id), is_synced = 1, updated_at = NOW()
@@ -571,7 +580,8 @@ async function pushSync(req, res) {
             [
               c.primer_nombre || null, c.segundo_nombre || null,
               c.primer_apellido || null, c.segundo_apellido || null,
-              nc, c.telefono || null, c.direccion || null, c.actividad_economica || null,
+              nc, cedulaFinal, tipoDoc, c.telefono || null, c.direccion || null,
+              c.actividad_economica || null,
               coord(c.latitud), coord(c.longitud), coord(c.latitud_cobro), coord(c.longitud_cobro),
               cobId, cloudId,
             ]
@@ -581,18 +591,20 @@ async function pushSync(req, res) {
           let clientId = esIdClienteOficial(c.id) ? c.id : await nextClienteId(conn);
           const [idTaken] = await conn.execute('SELECT id FROM Clientes WHERE id = ?', [clientId]);
           if (idTaken.length) clientId = await nextClienteId(conn);
+          const cedulaFinal = valCed.cedula || codigoSinDocumento(clientId);
 
           await conn.execute(
             `INSERT INTO Clientes (
               id, primer_nombre, segundo_nombre, primer_apellido, segundo_apellido,
-              nombre_completo, cedula, telefono, direccion, actividad_economica,
+              nombre_completo, cedula, documento_tipo, telefono, direccion, actividad_economica,
               latitud, longitud, cobrador_id, is_synced
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
             [
               clientId,
               c.primer_nombre || null, c.segundo_nombre || null,
               c.primer_apellido || null, c.segundo_apellido || null,
-              nc, c.cedula, c.telefono || null, c.direccion || null, c.actividad_economica || null,
+              nc, cedulaFinal, tipoDoc, c.telefono || null, c.direccion || null,
+              c.actividad_economica || null,
               coord(c.latitud), coord(c.longitud), cobId,
             ]
           );

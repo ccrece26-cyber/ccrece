@@ -1,5 +1,6 @@
 const { query } = require('../config/db');
-const { hoyISO } = require('./zonaHoraria');
+const { hoyISO, fechaEnZona } = require('./zonaHoraria');
+const { rangoDiaLocal } = require('./fechasSql');
 
 function fechaISO(valor) {
   if (valor == null || valor === '') return null;
@@ -261,6 +262,13 @@ async function listarHistorialAnticipos(opts = {}) {
   await ensureHistorialAnticiposTable();
   const soloActivos = opts.solo_activos !== false;
   const limit = Math.min(200, Number(opts.limit) || 80);
+  const params = [];
+  let filtroFecha = '';
+  if (opts.fecha_registro) {
+    const { inicio, fin } = rangoDiaLocal(fechaISO(opts.fecha_registro));
+    filtroFecha = ' AND h.created_at >= ? AND h.created_at < ?';
+    params.push(inicio, fin);
+  }
   const sql = `
     SELECT h.id, h.prestamo_id, h.cuota_id, h.fecha_original, h.fecha_anticipo,
            h.monto_programado, h.operador_id, h.estado, h.comentario, h.created_at, h.updated_at,
@@ -275,25 +283,108 @@ async function listarHistorialAnticipos(opts = {}) {
     LEFT JOIN Usuarios u ON u.id = h.operador_id
     WHERE h.deleted_at IS NULL
       ${soloActivos ? `AND h.estado = 'Activo'` : ''}
+      ${filtroFecha}
     ORDER BY h.created_at DESC
     LIMIT ${limit}`;
-  const rows = await query(sql);
-  return (rows || []).map((r) => ({
-    ...r,
-    fecha_original: fechaISO(r.fecha_original),
-    fecha_anticipo: fechaISO(r.fecha_anticipo),
-    fecha_cuota_actual: fechaISO(r.fecha_cuota_actual),
-    monto_programado: r.monto_programado != null ? Number(r.monto_programado) : null,
-    cuota_monto_pagado: r.cuota_monto_pagado != null ? Number(r.cuota_monto_pagado) : 0,
-    puede_revertir:
+  const rows = params.length ? await query(sql, params) : await query(sql);
+  return (rows || []).map((r) => {
+    const editable =
       r.estado === 'Activo' &&
       r.estado_cuota &&
-      ['Programada', 'Parcial'].includes(r.estado_cuota),
-    puede_corregir:
-      r.estado === 'Activo' &&
-      r.estado_cuota &&
-      ['Programada', 'Parcial'].includes(r.estado_cuota),
-  }));
+      ['Programada', 'Parcial'].includes(r.estado_cuota);
+    return {
+      ...r,
+      fecha_original: fechaISO(r.fecha_original),
+      fecha_anticipo: fechaISO(r.fecha_anticipo),
+      fecha_cuota_actual: fechaISO(r.fecha_cuota_actual),
+      fecha_registro: fechaEnZona(new Date(r.created_at)),
+      monto_programado: r.monto_programado != null ? Number(r.monto_programado) : null,
+      cuota_monto_pagado: r.cuota_monto_pagado != null ? Number(r.cuota_monto_pagado) : 0,
+      puede_revertir: editable,
+      puede_corregir: editable,
+      cuota_cobrada: r.estado_cuota && !['Programada', 'Parcial'].includes(r.estado_cuota),
+    };
+  });
+}
+
+/** Días calendario (Nicaragua) con al menos un registro de anticipo. */
+async function listarDiasConRegistroAnticipos(opts = {}) {
+  await ensureHistorialAnticiposTable();
+  const dias = Math.min(120, Number(opts.dias) || 60);
+  const rows = await query(
+    `SELECT h.created_at, h.estado
+     FROM Historial_Anticipos h
+     WHERE h.deleted_at IS NULL
+       AND h.created_at >= DATE_SUB(NOW(), INTERVAL ${dias} DAY)
+     ORDER BY h.created_at DESC`
+  );
+  const map = {};
+  for (const r of rows || []) {
+    const d = fechaEnZona(new Date(r.created_at));
+    if (!map[d]) map[d] = { fecha: d, total: 0, activos: 0, revertidos: 0 };
+    map[d].total += 1;
+    if (r.estado === 'Activo') map[d].activos += 1;
+    if (r.estado === 'Revertido') map[d].revertidos += 1;
+  }
+  return Object.values(map).sort((a, b) => b.fecha.localeCompare(a.fecha));
+}
+
+/** Registra historial retroactivo sin mover la cuota (anticipos previos al módulo). */
+async function registrarHistorialRetroactivo(conn, opts = {}) {
+  await ensureHistorialAnticiposTable(conn);
+  const cuotaId = opts.cuota_id;
+  const fechaOriginal = fechaISO(opts.fecha_original);
+  const fechaAnticipo = fechaISO(opts.fecha_anticipo);
+  if (!cuotaId || !fechaOriginal || !fechaAnticipo) {
+    throw new Error('cuota_id, fecha_original y fecha_anticipo son requeridos');
+  }
+
+  const [cuotas] = await conn.execute(
+    `SELECT cc.*, p.estado AS estado_prestamo
+     FROM Cuotas_Calendario cc
+     INNER JOIN Prestamos p ON p.id = cc.prestamo_id
+     WHERE cc.id = ? AND cc.deleted_at IS NULL LIMIT 1`,
+    [cuotaId]
+  );
+  const cuota = cuotas[0];
+  if (!cuota) throw new Error('Cuota no encontrada');
+
+  const [activos] = await conn.execute(
+    `SELECT id FROM Historial_Anticipos
+     WHERE cuota_id = ? AND estado = 'Activo' AND deleted_at IS NULL LIMIT 1`,
+    [cuotaId]
+  );
+  if (activos.length) throw new Error('Esta cuota ya tiene un anticipo activo en historial');
+
+  const { v4: uuidv4 } = require('uuid');
+  const histId = uuidv4();
+  const createdAt = opts.created_at || new Date();
+  await conn.execute(
+    `INSERT INTO Historial_Anticipos
+       (id, prestamo_id, cuota_id, fecha_original, fecha_anticipo, monto_programado,
+        operador_id, estado, comentario, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'Activo', ?, ?, NOW())`,
+    [
+      histId,
+      cuota.prestamo_id,
+      cuotaId,
+      fechaOriginal,
+      fechaAnticipo,
+      Number(cuota.monto_programado),
+      opts.operador_id || null,
+      opts.comentario || 'Recuperado retroactivamente (anticipo sin historial)',
+      createdAt,
+    ]
+  );
+
+  return {
+    id: histId,
+    cuota_id: cuotaId,
+    prestamo_id: cuota.prestamo_id,
+    fecha_original: fechaOriginal,
+    fecha_anticipo: fechaAnticipo,
+    mensaje: `Historial creado: ${fechaOriginal} → ${fechaAnticipo}.`,
+  };
 }
 
 /** Restaura la fecha original de la cuota. */
@@ -437,7 +528,7 @@ async function listarCuotasPendientesSinHistorial(opts = {}) {
      WHERE cc.deleted_at IS NULL
        AND cc.estado IN ('Programada', 'Parcial')
        AND h.id IS NULL
-       AND cc.fecha_programada >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       AND cc.fecha_programada >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
        AND cc.fecha_programada <= DATE_ADD(CURDATE(), INTERVAL 45 DAY)
      ORDER BY cc.fecha_programada ASC
      LIMIT ${limit * 3}`
@@ -585,6 +676,8 @@ module.exports = {
   moverCuotasDeFeriado,
   anticiparCuotaPrestamo,
   listarHistorialAnticipos,
+  listarDiasConRegistroAnticipos,
+  registrarHistorialRetroactivo,
   revertirAnticipo,
   corregirAnticipo,
   listarCuotasPendientesSinHistorial,

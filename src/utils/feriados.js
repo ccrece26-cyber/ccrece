@@ -162,12 +162,12 @@ async function ensureHistorialAnticiposTable(conn = null) {
 }
 
 /**
- * Anticipar: mueve la próxima cuota pendiente (o una con fecha >= hoy) a fechaObjetivo.
+ * Anticipar: mueve la cuota pendiente más antigua (misma regla que proxima_cuota en admin)
+ * o la cuota_id indicada, a fechaObjetivo.
  */
 async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}) {
   await ensureHistorialAnticiposTable(conn);
   const destino = fechaISO(fechaObjetivo) || hoyISO();
-  const hoy = hoyISO();
 
   const [prest] = await conn.execute(
     `SELECT id, estado, saldo_pendiente FROM Prestamos
@@ -185,27 +185,17 @@ async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}
       [opts.cuota_id, prestamoId]
     );
     cuota = rows[0] || null;
+    if (!cuota) throw new Error('La cuota indicada no está pendiente o no pertenece al préstamo');
   }
   if (!cuota) {
-    const [futuras] = await conn.execute(
+    const [proxima] = await conn.execute(
       `SELECT * FROM Cuotas_Calendario
        WHERE prestamo_id = ? AND deleted_at IS NULL
          AND estado IN ('Programada', 'Parcial')
-         AND fecha_programada >= ?
        ORDER BY fecha_programada ASC LIMIT 1`,
-      [prestamoId, hoy]
+      [prestamoId]
     );
-    if (futuras.length) cuota = futuras[0];
-    else {
-      const [atras] = await conn.execute(
-        `SELECT * FROM Cuotas_Calendario
-         WHERE prestamo_id = ? AND deleted_at IS NULL
-           AND estado IN ('Programada', 'Parcial')
-         ORDER BY fecha_programada ASC LIMIT 1`,
-        [prestamoId]
-      );
-      cuota = atras[0] || null;
-    }
+    cuota = proxima[0] || null;
   }
   if (!cuota) throw new Error('No hay cuota pendiente para anticipar');
 

@@ -137,10 +137,34 @@ async function moverCuotasDeFeriado(conn, fechaFeriado) {
   return { movidas, destino };
 }
 
+async function ensureHistorialAnticiposTable(conn = null) {
+  const sql = `CREATE TABLE IF NOT EXISTS Historial_Anticipos (
+    id VARCHAR(36) NOT NULL,
+    prestamo_id VARCHAR(36) NOT NULL,
+    cuota_id VARCHAR(36) NOT NULL,
+    fecha_original DATE NOT NULL,
+    fecha_anticipo DATE NOT NULL,
+    monto_programado DECIMAL(12,2) DEFAULT NULL,
+    operador_id VARCHAR(36) DEFAULT NULL,
+    estado VARCHAR(20) NOT NULL DEFAULT 'Activo',
+    comentario VARCHAR(255) DEFAULT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    deleted_at DATETIME DEFAULT NULL,
+    PRIMARY KEY (id),
+    KEY idx_anticipo_prestamo (prestamo_id),
+    KEY idx_anticipo_estado (estado),
+    KEY idx_anticipo_cuota (cuota_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`;
+  if (conn) await conn.execute(sql);
+  else await query(sql);
+}
+
 /**
  * Anticipar: mueve la próxima cuota pendiente (o una con fecha >= hoy) a fechaObjetivo.
  */
 async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}) {
+  await ensureHistorialAnticiposTable(conn);
   const destino = fechaISO(fechaObjetivo) || hoyISO();
   const hoy = hoyISO();
 
@@ -162,7 +186,6 @@ async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}
     cuota = rows[0] || null;
   }
   if (!cuota) {
-    // Preferir cuota futura más cercana (>= hoy); si no, la más antigua pendiente
     const [futuras] = await conn.execute(
       `SELECT * FROM Cuotas_Calendario
        WHERE prestamo_id = ? AND deleted_at IS NULL
@@ -186,6 +209,10 @@ async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}
   if (!cuota) throw new Error('No hay cuota pendiente para anticipar');
 
   const fechaAntes = fechaISO(cuota.fecha_programada);
+  if (fechaAntes === destino) {
+    throw new Error('La fecha de anticipo es igual a la fecha actual de la cuota');
+  }
+
   await conn.execute(
     `UPDATE Cuotas_Calendario
      SET fecha_programada = ?, updated_at = NOW(), is_synced = 1
@@ -193,7 +220,34 @@ async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}
     [destino, cuota.id]
   );
 
+  // Cerrar anticipos activos previos de la misma cuota
+  await conn.execute(
+    `UPDATE Historial_Anticipos
+     SET estado = 'Reemplazado', updated_at = NOW()
+     WHERE cuota_id = ? AND estado = 'Activo' AND deleted_at IS NULL`,
+    [cuota.id]
+  );
+
+  const { v4: uuidv4 } = require('uuid');
+  const histId = uuidv4();
+  await conn.execute(
+    `INSERT INTO Historial_Anticipos
+       (id, prestamo_id, cuota_id, fecha_original, fecha_anticipo, monto_programado, operador_id, estado, comentario)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'Activo', ?)`,
+    [
+      histId,
+      prestamoId,
+      cuota.id,
+      fechaAntes,
+      destino,
+      Number(cuota.monto_programado),
+      opts.operador_id || null,
+      opts.comentario || 'Anticipo de cuota',
+    ]
+  );
+
   return {
+    id: histId,
     cuota_id: cuota.id,
     prestamo_id: prestamoId,
     fecha_antes: fechaAntes,
@@ -203,14 +257,151 @@ async function anticiparCuotaPrestamo(conn, prestamoId, fechaObjetivo, opts = {}
   };
 }
 
+async function listarHistorialAnticipos(opts = {}) {
+  await ensureHistorialAnticiposTable();
+  const soloActivos = opts.solo_activos !== false;
+  const limit = Math.min(200, Number(opts.limit) || 80);
+  const sql = `
+    SELECT h.id, h.prestamo_id, h.cuota_id, h.fecha_original, h.fecha_anticipo,
+           h.monto_programado, h.operador_id, h.estado, h.comentario, h.created_at, h.updated_at,
+           c.nombre_completo, c.cedula, c.id AS cliente_id,
+           cc.estado AS estado_cuota, cc.fecha_programada AS fecha_cuota_actual,
+           cc.monto_pagado AS cuota_monto_pagado,
+           u.nombre_completo AS operador_nombre
+    FROM Historial_Anticipos h
+    INNER JOIN Prestamos p ON p.id = h.prestamo_id
+    INNER JOIN Clientes c ON c.id = p.cliente_id
+    LEFT JOIN Cuotas_Calendario cc ON cc.id = h.cuota_id
+    LEFT JOIN Usuarios u ON u.id = h.operador_id
+    WHERE h.deleted_at IS NULL
+      ${soloActivos ? `AND h.estado = 'Activo'` : ''}
+    ORDER BY h.created_at DESC
+    LIMIT ${limit}`;
+  const rows = await query(sql);
+  return (rows || []).map((r) => ({
+    ...r,
+    fecha_original: fechaISO(r.fecha_original),
+    fecha_anticipo: fechaISO(r.fecha_anticipo),
+    fecha_cuota_actual: fechaISO(r.fecha_cuota_actual),
+    monto_programado: r.monto_programado != null ? Number(r.monto_programado) : null,
+    cuota_monto_pagado: r.cuota_monto_pagado != null ? Number(r.cuota_monto_pagado) : 0,
+    puede_revertir:
+      r.estado === 'Activo' &&
+      r.estado_cuota &&
+      ['Programada', 'Parcial'].includes(r.estado_cuota),
+    puede_corregir:
+      r.estado === 'Activo' &&
+      r.estado_cuota &&
+      ['Programada', 'Parcial'].includes(r.estado_cuota),
+  }));
+}
+
+/** Restaura la fecha original de la cuota. */
+async function revertirAnticipo(conn, anticipoId, opts = {}) {
+  await ensureHistorialAnticiposTable(conn);
+  const [rows] = await conn.execute(
+    `SELECT * FROM Historial_Anticipos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [anticipoId]
+  );
+  const h = rows[0];
+  if (!h) throw new Error('Anticipo no encontrado');
+  if (h.estado !== 'Activo') throw new Error(`Este anticipo ya está ${h.estado}`);
+
+  const [cuotas] = await conn.execute(
+    `SELECT * FROM Cuotas_Calendario WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [h.cuota_id]
+  );
+  const cuota = cuotas[0];
+  if (!cuota) throw new Error('La cuota ya no existe');
+  if (!['Programada', 'Parcial'].includes(cuota.estado)) {
+    throw new Error('La cuota ya fue cobrada; no se puede revertir el anticipo');
+  }
+
+  const original = fechaISO(h.fecha_original);
+  await conn.execute(
+    `UPDATE Cuotas_Calendario
+     SET fecha_programada = ?, updated_at = NOW(), is_synced = 1
+     WHERE id = ?`,
+    [original, h.cuota_id]
+  );
+  await conn.execute(
+    `UPDATE Historial_Anticipos
+     SET estado = 'Revertido', comentario = CONCAT(COALESCE(comentario,''), ?), updated_at = NOW()
+     WHERE id = ?`,
+    [` | Revertido → ${original}`, anticipoId]
+  );
+
+  return {
+    id: anticipoId,
+    cuota_id: h.cuota_id,
+    fecha_restaurada: original,
+    mensaje: `Anticipo revertido. La cuota volvió a ${original}.`,
+  };
+}
+
+/** Corrige la fecha de anticipo (sin perder el historial original). */
+async function corregirAnticipo(conn, anticipoId, nuevaFecha, opts = {}) {
+  await ensureHistorialAnticiposTable(conn);
+  const destino = fechaISO(nuevaFecha);
+  if (!destino) throw new Error('Nueva fecha inválida');
+
+  const [rows] = await conn.execute(
+    `SELECT * FROM Historial_Anticipos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [anticipoId]
+  );
+  const h = rows[0];
+  if (!h) throw new Error('Anticipo no encontrado');
+  if (h.estado !== 'Activo') throw new Error(`Este anticipo ya está ${h.estado}`);
+
+  const [cuotas] = await conn.execute(
+    `SELECT * FROM Cuotas_Calendario WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [h.cuota_id]
+  );
+  const cuota = cuotas[0];
+  if (!cuota) throw new Error('La cuota ya no existe');
+  if (!['Programada', 'Parcial'].includes(cuota.estado)) {
+    throw new Error('La cuota ya fue cobrada; no se puede corregir el anticipo');
+  }
+
+  const antes = fechaISO(h.fecha_anticipo);
+  if (antes === destino) throw new Error('Es la misma fecha de anticipo');
+
+  await conn.execute(
+    `UPDATE Cuotas_Calendario
+     SET fecha_programada = ?, updated_at = NOW(), is_synced = 1
+     WHERE id = ?`,
+    [destino, h.cuota_id]
+  );
+  await conn.execute(
+    `UPDATE Historial_Anticipos
+     SET fecha_anticipo = ?, updated_at = NOW(),
+         comentario = CONCAT(COALESCE(comentario,''), ?)
+     WHERE id = ?`,
+    [destino, ` | Corregido ${antes} → ${destino}`, anticipoId]
+  );
+
+  return {
+    id: anticipoId,
+    cuota_id: h.cuota_id,
+    fecha_original: fechaISO(h.fecha_original),
+    fecha_antes: antes,
+    fecha_cobro: destino,
+    mensaje: `Anticipo corregido a ${destino}. Fecha original de cuota: ${fechaISO(h.fecha_original)}.`,
+  };
+}
+
 module.exports = {
   ensureFeriadosTable,
+  ensureHistorialAnticiposTable,
   listarFeriadosActivos,
   listarFeriadosTodos,
   cargarSetFeriados,
   siguienteDiaHabil,
   moverCuotasDeFeriado,
   anticiparCuotaPrestamo,
+  listarHistorialAnticipos,
+  revertirAnticipo,
+  corregirAnticipo,
   fechaISO,
   addDaysISO,
 };

@@ -42,6 +42,9 @@ const {
   listarFeriadosTodos,
   moverCuotasDeFeriado,
   anticiparCuotaPrestamo,
+  listarHistorialAnticipos,
+  revertirAnticipo,
+  corregirAnticipo,
   fechaISO: fechaFeriadoISO,
 } = require('../utils/feriados');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
@@ -2267,6 +2270,57 @@ async function anticiparCobro(req, res) {
     await conn.beginTransaction();
     const resultado = await anticiparCuotaPrestamo(conn, req.body.prestamo_id, req.body.fecha_cobro, {
       cuota_id: req.body.cuota_id,
+      operador_id: req.operadorId,
+      comentario: req.body.comentario || 'Anticipo de cuota',
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function listAnticipos(req, res) {
+  try {
+    const solo = String(req.query.todos || '') === '1' ? false : true;
+    const data = await listarHistorialAnticipos({
+      solo_activos: solo,
+      limit: req.query.limit,
+    });
+    return res.json({ success: true, data });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function revertirAnticipoAdmin(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await revertirAnticipo(conn, req.params.id, {
+      operador_id: req.operadorId,
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
+async function corregirAnticipoAdmin(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await corregirAnticipo(conn, req.params.id, req.body.fecha_cobro, {
+      operador_id: req.operadorId,
     });
     await conn.commit();
     await afterCarteraMutation(conn);
@@ -2401,6 +2455,9 @@ module.exports = {
   createFeriado,
   deleteFeriado,
   anticiparCobro,
+  listAnticipos,
+  revertirAnticipoAdmin,
+  corregirAnticipoAdmin,
   castigarPerdida,
   exportCarteraImportacion,
   esIdClienteOficial,

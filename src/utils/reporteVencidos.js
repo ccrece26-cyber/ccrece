@@ -163,17 +163,32 @@ async function enriquecerPrestamosProrroga(rows) {
 
   return (rows || []).map((p) => {
     const dias = parseDias(p.dias_de_cobro);
-    const venc = fechaVencimientoCredito(p.fecha_desembolso, p.plazo_semanas, dias, {
+    const desembolso = fechaISO(p.fecha_desembolso);
+    const venc = fechaVencimientoCredito(desembolso || p.fecha_desembolso, p.plazo_semanas, dias, {
       periodicidad: p.periodicidad,
       tipo_frecuencia: p.periodicidad,
     });
     const vencido = !!(venc && hoy >= venc);
     const hist = histMap.get(p.id) || [];
     const semanas_prorroga_total = hist.reduce((s, h) => s + (Number(h.semanas_extra) || 0), 0);
+    // No esparcir Date crudos: JSON.stringify(Date) a veces llega mal al cliente.
     return {
-      ...p,
+      id: p.id,
+      cliente_id: p.cliente_id,
+      nombre_completo: p.nombre_completo,
+      cedula: p.cedula,
+      telefono: p.telefono,
+      cobrador: p.cobrador || null,
+      monto_desembolsado: Number(p.monto_desembolsado),
+      monto_total_pagar: Number(p.monto_total_pagar),
+      saldo_pendiente: Number(p.saldo_pendiente),
+      cuota_semanal_base: Number(p.cuota_semanal_base),
+      plazo_semanas: Number(p.plazo_semanas),
+      tasa_interes_aplicada: Number(p.tasa_interes_aplicada),
+      estado: p.estado,
+      periodicidad: p.periodicidad || 'SEMANAL',
       dias_de_cobro: dias,
-      fecha_desembolso: fechaISO(p.fecha_desembolso),
+      fecha_desembolso: desembolso,
       fecha_vencimiento: venc,
       vencido,
       dias_vencido: vencido && venc ? diasEntre(venc, hoy) : 0,

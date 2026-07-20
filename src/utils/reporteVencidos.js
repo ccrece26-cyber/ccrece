@@ -15,15 +15,50 @@ function diasEntre(desdeISO, hastaISO) {
   const a = new Date(`${desdeISO}T12:00:00`);
   const b = new Date(`${hastaISO}T12:00:00`);
   if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
-  return Math.max(0, Math.floor((b - a) / (86400000)));
+  return Math.max(0, Math.floor((b - a) / 86400000));
+}
+
+function fechaProrrogaISO(v) {
+  if (!v) return null;
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.toISOString().slice(0, 10);
+  }
+  return String(v).slice(0, 10);
+}
+
+async function cargarHistorialProrrogas(prestamoIds) {
+  if (!prestamoIds.length) return new Map();
+  const ph = prestamoIds.map(() => '?').join(',');
+  const rows = await query(
+    `SELECT id, prestamo_id, semanas_extra, saldo_anterior, nueva_cuota_semanal,
+            comentario, fecha_prorroga
+     FROM Historial_Prorrogas
+     WHERE prestamo_id IN (${ph}) AND deleted_at IS NULL
+     ORDER BY fecha_prorroga DESC`,
+    prestamoIds
+  );
+  const byPrestamo = new Map();
+  for (const r of rows) {
+    const item = {
+      id: r.id,
+      semanas_extra: Number(r.semanas_extra) || 0,
+      saldo_anterior: Number(r.saldo_anterior) || 0,
+      nueva_cuota_semanal: Number(r.nueva_cuota_semanal) || 0,
+      comentario: r.comentario || null,
+      fecha_prorroga: fechaProrrogaISO(r.fecha_prorroga),
+    };
+    if (!byPrestamo.has(r.prestamo_id)) byPrestamo.set(r.prestamo_id, []);
+    byPrestamo.get(r.prestamo_id).push(item);
+  }
+  return byPrestamo;
 }
 
 async function armarReporteVencidos() {
   const hoy = hoyISO();
   const rows = await query(
     `SELECT p.id AS prestamo_id, p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro,
-            p.monto_desembolsado, p.monto_total_pagar, p.saldo_pendiente, p.cuota_semanal_base,
-            p.estado,
+            p.periodicidad, p.monto_desembolsado, p.monto_total_pagar, p.saldo_pendiente,
+            p.cuota_semanal_base, p.estado, p.cliente_id,
             c.id AS codigo_cliente, c.nombre_completo, c.cedula, c.telefono,
             u.nombre_completo AS cobrador,
             (SELECT COALESCE(SUM(monto_pagado), 0) FROM Pagos pg
@@ -36,36 +71,60 @@ async function armarReporteVencidos() {
 
   const filas = [];
   for (const p of rows) {
-    const venc = fechaVencimientoCredito(p.fecha_desembolso, p.plazo_semanas, parseDias(p.dias_de_cobro));
+    const dias = parseDias(p.dias_de_cobro);
+    const venc = fechaVencimientoCredito(p.fecha_desembolso, p.plazo_semanas, dias, {
+      periodicidad: p.periodicidad,
+      tipo_frecuencia: p.periodicidad,
+    });
     if (!venc || hoy < venc) continue;
     const pagado = Number(p.total_pagos || 0);
     filas.push({
+      id: p.prestamo_id,
+      prestamo_id: p.prestamo_id,
+      cliente_id: p.cliente_id,
       codigo_cliente: p.codigo_cliente,
       nombre_completo: p.nombre_completo,
       cedula: p.cedula,
       telefono: p.telefono,
       cobrador: p.cobrador || 'Sin asignar',
-      prestamo_id: p.prestamo_id,
       fecha_desembolso: String(p.fecha_desembolso).slice(0, 10),
       fecha_vencimiento: venc,
       dias_vencido: diasEntre(venc, hoy),
       plazo_semanas: Number(p.plazo_semanas),
+      dias_de_cobro: dias,
+      periodicidad: p.periodicidad || 'SEMANAL',
       monto_desembolsado: Number(p.monto_desembolsado),
       monto_total_pagar: Number(p.monto_total_pagar),
       total_pagos: pagado,
       saldo_pendiente: Number(p.saldo_pendiente),
       cuota_semanal_base: Number(p.cuota_semanal_base),
       estado: p.estado,
+      prorrogas_count: 0,
+      semanas_prorroga_total: 0,
+      ultima_prorroga: null,
+      historial_prorrogas: [],
     });
+  }
+
+  const histMap = await cargarHistorialProrrogas(filas.map((f) => f.prestamo_id));
+  for (const f of filas) {
+    const hist = histMap.get(f.prestamo_id) || [];
+    f.historial_prorrogas = hist;
+    f.prorrogas_count = hist.length;
+    f.semanas_prorroga_total = hist.reduce((s, h) => s + (Number(h.semanas_extra) || 0), 0);
+    f.ultima_prorroga = hist[0] || null;
   }
 
   filas.sort((a, b) => b.dias_vencido - a.dias_vencido || b.saldo_pendiente - a.saldo_pendiente);
 
   const resumen = {
     cantidad: filas.length,
+    con_prorroga: filas.filter((f) => f.prorrogas_count > 0).length,
+    sin_prorroga: filas.filter((f) => f.prorrogas_count === 0).length,
     saldo_total: Number(filas.reduce((s, f) => s + f.saldo_pendiente, 0).toFixed(2)),
     capital_total: Number(filas.reduce((s, f) => s + f.monto_desembolsado, 0).toFixed(2)),
     pagado_total: Number(filas.reduce((s, f) => s + f.total_pagos, 0).toFixed(2)),
+    semanas_prorroga_total: filas.reduce((s, f) => s + f.semanas_prorroga_total, 0),
   };
 
   return {

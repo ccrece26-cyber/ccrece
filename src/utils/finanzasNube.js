@@ -274,10 +274,14 @@ const parseDiasCobro = (valor) => {
   }
 };
 
-const fechaVencimientoCredito = (fechaDesembolso, plazoSemanas, diasDeCobro) => {
+const fechaVencimientoCredito = (fechaDesembolso, plazoSemanas, diasDeCobro, opts = {}) => {
   const inicio = normalizarFechaDesembolso(fechaDesembolso);
   if (!inicio) return null;
-  const agenda = generarAgendaDeCobro(inicio, plazoSemanas, parseDiasCobro(diasDeCobro), 0);
+  const agenda = generarAgendaDeCobro(inicio, plazoSemanas, diasDeCobro, 0, {
+    tipo_frecuencia: opts.tipo_frecuencia || opts.periodicidad,
+    periodicidad: opts.periodicidad,
+    dias_mes: opts.dias_mes,
+  });
   if (!agenda.length) return inicio;
   return agenda[agenda.length - 1].fecha_programada;
 };
@@ -286,7 +290,12 @@ const prestamoEstaVencido = (prestamo, refDate = new Date()) => {
   const vencimiento = fechaVencimientoCredito(
     prestamo?.fecha_desembolso,
     prestamo?.plazo_semanas,
-    prestamo?.dias_de_cobro
+    prestamo?.dias_de_cobro,
+    {
+      tipo_frecuencia: prestamo?.tipo_frecuencia || prestamo?.periodicidad,
+      periodicidad: prestamo?.periodicidad,
+      dias_mes: prestamo?.dias_mes,
+    }
   );
   if (!vencimiento) return false;
   return toFechaISO(refDate) >= vencimiento;

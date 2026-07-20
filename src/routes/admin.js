@@ -38,7 +38,7 @@ const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
-const { armarReporteVencidos } = require('../utils/reporteVencidos');
+const { armarReporteVencidos, enriquecerPrestamosProrroga } = require('../utils/reporteVencidos');
 const { aplicarMontoACuotas, revertirMontoDeCuotas, recalcularSaldoPrestamoDesdeCuotas } = require('../utils/registrarPagoNube');
 const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix, whereCierreCalendarioDia } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
@@ -267,11 +267,13 @@ async function listPrestamosActivos(req, res) {
   try {
     const rows = await query(
       `SELECT p.*, c.nombre_completo, c.cedula, c.telefono,
+              uc.nombre_completo AS cobrador,
               ur.nombre_completo AS cobrador_registro_nombre,
               ue.nombre_completo AS cobrador_entrega_nombre,
               uop.nombre_completo AS cobrador_opero_nombre
        FROM Prestamos p
        JOIN Clientes c ON p.cliente_id = c.id
+       LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id
        LEFT JOIN Usuarios ur ON p.cobrador_registro_id = ur.id
        LEFT JOIN Usuarios ue ON p.cobrador_entrega_id = ue.id
        LEFT JOIN Renovaciones_Log r ON r.prestamo_nuevo_id = p.id
@@ -279,7 +281,25 @@ async function listPrestamosActivos(req, res) {
        WHERE p.estado = 'Activo' AND p.deleted_at IS NULL
        ORDER BY c.nombre_completo`
     );
-    return res.json({ success: true, data: rows });
+    const data = await enriquecerPrestamosProrroga(rows);
+    data.sort((a, b) => {
+      if (a.vencido !== b.vencido) return a.vencido ? -1 : 1;
+      if ((b.dias_vencido || 0) !== (a.dias_vencido || 0)) {
+        return (b.dias_vencido || 0) - (a.dias_vencido || 0);
+      }
+      return String(a.nombre_completo || '').localeCompare(String(b.nombre_completo || ''));
+    });
+    return res.json({
+      success: true,
+      data,
+      resumen: {
+        cantidad: data.length,
+        vencidos: data.filter((p) => p.vencido).length,
+        con_prorroga: data.filter((p) => p.prorrogas_count > 0).length,
+        sin_prorroga: data.filter((p) => !p.prorrogas_count).length,
+        saldo_total: Number(data.reduce((s, p) => s + Number(p.saldo_pendiente || 0), 0).toFixed(2)),
+      },
+    });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }

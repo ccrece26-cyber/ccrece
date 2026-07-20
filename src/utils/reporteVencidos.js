@@ -137,4 +137,37 @@ async function armarReporteVencidos() {
   };
 }
 
-module.exports = { armarReporteVencidos };
+/**
+ * Enriquece filas de préstamos activos con vencimiento + historial de prórrogas.
+ * Mutates/returns enriched copies suitable for la vista admin de Prórrogas.
+ */
+async function enriquecerPrestamosProrroga(rows) {
+  const hoy = hoyISO();
+  const ids = (rows || []).map((p) => p.id).filter(Boolean);
+  const histMap = await cargarHistorialProrrogas(ids);
+
+  return (rows || []).map((p) => {
+    const dias = parseDias(p.dias_de_cobro);
+    const venc = fechaVencimientoCredito(p.fecha_desembolso, p.plazo_semanas, dias, {
+      periodicidad: p.periodicidad,
+      tipo_frecuencia: p.periodicidad,
+    });
+    const vencido = !!(venc && hoy >= venc);
+    const hist = histMap.get(p.id) || [];
+    const semanas_prorroga_total = hist.reduce((s, h) => s + (Number(h.semanas_extra) || 0), 0);
+    return {
+      ...p,
+      dias_de_cobro: dias,
+      fecha_desembolso: p.fecha_desembolso ? String(p.fecha_desembolso).slice(0, 10) : null,
+      fecha_vencimiento: venc,
+      vencido,
+      dias_vencido: vencido && venc ? diasEntre(venc, hoy) : 0,
+      historial_prorrogas: hist,
+      prorrogas_count: hist.length,
+      semanas_prorroga_total,
+      ultima_prorroga: hist[0] || null,
+    };
+  });
+}
+
+module.exports = { armarReporteVencidos, enriquecerPrestamosProrroga, cargarHistorialProrrogas };

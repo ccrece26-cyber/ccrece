@@ -115,18 +115,39 @@ async function aplicarNegociacionVencido(conn, opts) {
 
   if (montoPerdonado > 0) {
     const nuevoTotal = Number((Number(prestamo.monto_total_pagar) - montoPerdonado).toFixed(2));
+    const redist = await redistribuirSaldoEnCuotasPendientes(conn, prestamoId, nuevoSaldo);
+    cuotaTrasPerdon = redist.cuotaPorVisita;
+    cuotasAjustadas = redist.cuotasAjustadas;
+
+    let diasN = 1;
+    try {
+      const raw = typeof prestamo.dias_de_cobro === 'string'
+        ? JSON.parse(prestamo.dias_de_cobro)
+        : prestamo.dias_de_cobro;
+      if (Array.isArray(raw) && raw.length) diasN = raw.length;
+    } catch {
+      diasN = Number(prestamo.frecuencia_semana) || 1;
+    }
+    const nuevaCuotaSemanal =
+      cuotaTrasPerdon != null
+        ? Number((cuotaTrasPerdon * diasN).toFixed(2))
+        : Number(prestamo.cuota_semanal_base) || 0;
+
     await conn.execute(
       `UPDATE Prestamos SET
         saldo_pendiente = ?,
         monto_total_pagar = ?,
+        cuota_semanal_base = ?,
         updated_at = NOW(),
         is_synced = 1
        WHERE id = ?`,
-      [nuevoSaldo, Math.max(nuevoTotal, Number(prestamo.monto_desembolsado) || 0), prestamoId]
+      [
+        nuevoSaldo,
+        Math.max(nuevoTotal, Number(prestamo.monto_desembolsado) || 0),
+        nuevaCuotaSemanal,
+        prestamoId,
+      ]
     );
-    const redist = await redistribuirSaldoEnCuotasPendientes(conn, prestamoId, nuevoSaldo);
-    cuotaTrasPerdon = redist.cuotaPorVisita;
-    cuotasAjustadas = redist.cuotasAjustadas;
 
     const notaPerdon = `Negociación: perdón C$ ${montoPerdonado.toFixed(2)} (saldo ${saldoAnterior.toFixed(2)} → ${nuevoSaldo.toFixed(2)})${
       comentario ? ` — ${comentario}` : ''
@@ -136,13 +157,7 @@ async function aplicarNegociacionVencido(conn, opts) {
         id, prestamo_id, semanas_extra, saldo_anterior, nueva_cuota_semanal,
         fecha_prorroga, comentario, is_synced
       ) VALUES (?, ?, 0, ?, ?, NOW(), ?, 1)`,
-      [
-        uuidv4(),
-        prestamoId,
-        saldoAnterior,
-        Number(prestamo.cuota_semanal_base) || cuotaTrasPerdon || 0,
-        notaPerdon,
-      ]
+      [uuidv4(), prestamoId, saldoAnterior, nuevaCuotaSemanal, notaPerdon]
     );
   }
 

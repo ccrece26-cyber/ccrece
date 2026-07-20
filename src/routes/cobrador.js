@@ -1348,7 +1348,7 @@ async function pushSync(req, res) {
   }
 }
 
-/** Parche ligero: pagos corregidos o registrados por admin + préstamos/cuotas afectados. */
+/** Parche ligero: pagos corregidos por admin + préstamos/cuotas tocados (negociación, prórroga, etc.). */
 async function cargarCorreccionesAdmin(cobradorId, desde) {
   const desdeTs = desdeCorreccionesUnix(desde);
   const pagos = await query(
@@ -1368,11 +1368,32 @@ async function cargarCorreccionesAdmin(cobradorId, desde) {
     [cobradorId, cobradorId, desdeTs, desdeTs, desdeTs]
   );
 
-  if (!pagos.length) {
+  const prestamosPorPago = [...new Set(pagos.map((p) => p.prestamo_id))];
+
+  // Negociación / prórroga / edición de saldo o calendario (sin pago asociado)
+  const prestamosNegociados = await query(
+    `SELECT p.id, p.cliente_id, p.saldo_pendiente, p.estado, p.cuota_semanal_base,
+            p.monto_total_pagar, p.monto_desembolsado, p.plazo_semanas,
+            p.tasa_interes_aplicada, p.dias_de_cobro, p.frecuencia_semana,
+            p.fecha_desembolso, p.fiador_id, p.cobrador_registro_id, p.cobrador_entrega_id,
+            p.numero_recibo_fisico, p.updated_at, p.periodicidad
+     FROM Prestamos p
+     INNER JOIN Clientes c ON p.cliente_id = c.id
+     WHERE c.cobrador_id = ?
+       AND p.deleted_at IS NULL
+       AND p.estado = 'Activo'
+       AND UNIX_TIMESTAMP(p.updated_at) > ?`,
+    [cobradorId, desdeTs]
+  );
+
+  const prestamoIds = [
+    ...new Set([...prestamosPorPago, ...prestamosNegociados.map((p) => p.id)]),
+  ];
+
+  if (!prestamoIds.length) {
     return { pagos: [], prestamos: [], cuotas: [] };
   }
 
-  const prestamoIds = [...new Set(pagos.map((p) => p.prestamo_id))];
   const ph = prestamoIds.map(() => '?').join(',');
 
   const prestamos = await query(
@@ -1380,7 +1401,7 @@ async function cargarCorreccionesAdmin(cobradorId, desde) {
             p.monto_total_pagar, p.monto_desembolsado, p.plazo_semanas,
             p.tasa_interes_aplicada, p.dias_de_cobro, p.frecuencia_semana,
             p.fecha_desembolso, p.fiador_id, p.cobrador_registro_id, p.cobrador_entrega_id,
-            p.numero_recibo_fisico, p.updated_at
+            p.numero_recibo_fisico, p.updated_at, p.periodicidad
      FROM Prestamos p
      WHERE p.id IN (${ph}) AND p.deleted_at IS NULL`,
     prestamoIds
@@ -1606,7 +1627,18 @@ async function syncAviso(req, res) {
       [cobradorId, cobradorId, desdeTs, desdeTs, desdeTs]
     );
 
-    const n = Number(correcciones[0]?.n || 0);
+    const negociaciones = await query(
+      `SELECT COUNT(*) AS n
+       FROM Prestamos p
+       INNER JOIN Clientes c ON p.cliente_id = c.id
+       WHERE c.cobrador_id = ?
+         AND p.deleted_at IS NULL
+         AND p.estado = 'Activo'
+         AND UNIX_TIMESTAMP(p.updated_at) > ?`,
+      [cobradorId, desdeTs]
+    );
+
+    const n = Number(correcciones[0]?.n || 0) + Number(negociaciones[0]?.n || 0);
     const serverTime = new Date().toISOString();
     const base = {
       success: true,

@@ -400,20 +400,32 @@ function main() {
     { campo: 'filas_carga', nota: String(activos.length) },
     { campo: 'excluidos', nota: String(excluidos.length) },
     {
+      campo: 'saldo_pendiente',
+      nota: 'VERDAD: lo que debe hoy. Pagado histórico = total_contrato − saldo (recalculado). Se aplica FIFO a cuotas.',
+    },
+    {
+      campo: 'monto_pagado_historico',
+      nota: 'Recalculado como total−saldo. No confiar en la columna original del Excel si no cuadraba.',
+    },
+    {
+      campo: 'semanas_pagadas',
+      nota: 'Vaciado si era > plazo (suelen ser visitas). No se usa si hay saldo.',
+    },
+    {
       campo: 'tasa_mensual',
       nota: 'Convertida a % mensual (10 = 10%/mes). El archivo fuente tenía tasa GLOBAL.',
     },
     {
       campo: 'cobrador_email',
-      nota: 'Cobrador 1→cobrador1, Cobrador 2→cobrador2. Ajuste si sus emails reales son otros.',
+      nota: 'Cobrador 1→cobrador1, Cobrador 2→cobrador2.',
     },
     {
-      campo: 'documento_tipo',
-      nota: 'nacional por defecto. Cambie a extranjero si aplica.',
+      campo: 'despues_de_cargar',
+      nota: 'Cobros, abonos parciales, varias cuotas y liquidaciones usan el mismo FIFO sobre el calendario.',
     },
     {
       campo: 'uso',
-      nota: 'Importar en Admin → Carga masiva (hoja Cartera). Borrar filas de ejemplo si hubiera.',
+      nota: 'Importar hoja Cartera en Admin → Carga masiva.',
     },
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(instrucciones), 'Instrucciones');

@@ -42,34 +42,47 @@ const COLUMNAS = [
 const INSTRUCCIONES = [
   {
     campo: 'codigo_cliente',
-    nota: 'Opcional. 5 o CC-5 → id CC-5 (numeración del Excel original). Tras la carga, nuevos siguen en max+1.',
+    nota: 'Opcional. 5 o CC-5 → id CC-5. Tras la carga, nuevos = max+1.',
   },
   {
     campo: 'cedula',
-    nota: 'Opcional. Nacional: 13 dígitos + letra (ej. 0011208760015A), puede /2. Vacío → SINDOC-{código}. Extranjero: cualquier doc.',
+    nota: 'Opcional. Nacional NIC o vacío (SINDOC). Extranjero: cualquier doc.',
   },
   {
     campo: 'documento_tipo',
-    nota: 'nacional (default) | extranjero. Extranjero no exige formato NIC.',
+    nota: 'nacional (default) | extranjero.',
   },
-  { campo: 'cobrador_email', nota: 'Email real del cobrador (hoja Cobradores). No use EJEMPLO@borrar.com.' },
+  { campo: 'cobrador_email', nota: 'Email real del cobrador. No use EJEMPLO@borrar.com.' },
   { campo: 'monto_desembolsado', nota: 'Capital original (ej. 5000).' },
   {
     campo: 'plazo_semanas',
-    nota: 'Semanas del plan. Interés: tasa_mensual × (plazo/4). Mes = 4 semanas. Ej. 22 sem × 10% = 55% global.',
+    nota: 'Semanas del plan. Interés: tasa_mensual × (plazo/4).',
   },
-  { campo: 'tasa_mensual', nota: '10 = 10% por mes financiero (NO es la tasa global).' },
+  { campo: 'tasa_mensual', nota: '10 = 10%/mes financiero. NO es la tasa global.' },
   {
     campo: 'tipo_frecuencia',
-    nota: 'SEMANAL o DIAS_MES. Si vacío, se detecta por dias_cobro/dias_mes.',
+    nota: 'SEMANAL o DIAS_MES.',
   },
-  { campo: 'dias_cobro', nota: 'SEMANAL: LUNES,MIERCOLES,VIERNES. También "15 y 30 de Cada Mes".' },
-  { campo: 'dias_mes', nota: 'DIAS_MES: 15,30 o 10,25. Vencimiento = desembolso + plazo×7.' },
-  { campo: 'fecha_desembolso', nota: 'YYYY-MM-DD (ej. 2025-11-15)' },
-  { campo: 'saldo_pendiente', nota: 'Lo que debe hoy (ej. 4200). Fuente principal.' },
-  { campo: 'monto_pagado_historico', nota: 'Opcional. Abonado antes de la app (= total − saldo).' },
-  { campo: 'fecha_ultimo_abono', nota: 'Opcional. Fecha del pago histórico (YYYY-MM-DD).' },
-  { campo: 'semanas_pagadas', nota: 'Solo referencia. Borre filas de ejemplo antes de importar.' },
+  { campo: 'dias_cobro', nota: 'SEMANAL: LUNES,MIERCOLES,VIERNES.' },
+  { campo: 'dias_mes', nota: 'DIAS_MES: 15,30.' },
+  { campo: 'fecha_desembolso', nota: 'YYYY-MM-DD' },
+  {
+    campo: 'saldo_pendiente',
+    nota: 'VERDAD: lo que debe hoy. Pagado histórico = total_contrato − saldo. Se reparte FIFO en cuotas.',
+  },
+  {
+    campo: 'monto_pagado_historico',
+    nota: 'Opcional. Si no cuadra con (total−saldo), se recalcula. Puede dejarse vacío.',
+  },
+  { campo: 'fecha_ultimo_abono', nota: 'Opcional. Fecha del pago histórico.' },
+  {
+    campo: 'semanas_pagadas',
+    nota: 'No usar como verdad. Solo si faltan saldo/pagado. Si > plazo se ignora.',
+  },
+  {
+    campo: 'despues_de_cargar',
+    nota: 'Cobros, abonos parciales, varias cuotas y liquidaciones siguen igual (FIFO). La carga solo deja saldo/cuotas al día.',
+  },
 ];
 
 const FILAS_EJEMPLO = [

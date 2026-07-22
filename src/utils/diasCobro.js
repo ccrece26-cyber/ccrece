@@ -89,7 +89,42 @@ const debeSugerirCobroEnFecha = (fechaRefISO, prestamo) => {
  * Agenda con feriados / anticipos:
  * - En feriado: solo si hay cuota con fecha_programada = hoy (anticipo raro al feriado).
  * - Fuera de feriado: día de cobro habitual O cuota movida/anticipada a hoy.
+ * - Día siguiente a un feriado: también quien cobraba el día feriado y tiene cuota vencida
+ *   (sin mover fechas del calendario).
  */
+const addDaysISOLocal = (fecha, days) => {
+  const d = new Date(`${fecha}T12:00:00`);
+  d.setDate(d.getDate() + days);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const siguienteDiaHabilLocal = (fecha, setFeriados) => {
+  let f = addDaysISOLocal(normalizarFechaISO(fecha) || fecha, 1);
+  let guard = 0;
+  while (setFeriados && setFeriados.has(f) && guard < 60) {
+    f = addDaysISOLocal(f, 1);
+    guard += 1;
+  }
+  return f;
+};
+
+/** ¿Hoy es el día hábil siguiente a un feriado que era día de cobro de este préstamo? */
+const esRecuperacionPostFeriado = (fechaRefISO, prestamo, feriadosSet) => {
+  if (!feriadosSet || !feriadosSet.size || !prestamo) return false;
+  const ref = normalizarFechaISO(fechaRefISO);
+  if (!ref) return false;
+  for (const f of feriadosSet) {
+    const fer = normalizarFechaISO(f) || f;
+    if (!fer) continue;
+    if (siguienteDiaHabilLocal(fer, feriadosSet) !== ref) continue;
+    if (incluyeDiaEnFecha(fer, prestamo.dias_de_cobro, prestamo.periodicidad)) return true;
+  }
+  return false;
+};
+
 const debeIncluirEnAgenda = (fechaRefISO, prestamo, opts = {}) => {
   if (!prestamo) return false;
   const ref = normalizarFechaISO(fechaRefISO) || fechaCalendarioISO();
@@ -98,6 +133,10 @@ const debeIncluirEnAgenda = (fechaRefISO, prestamo, opts = {}) => {
   const tieneCuotaHoy = !!opts.tieneCuotaHoy;
   if (feriados && feriados.has(ref)) return tieneCuotaHoy;
   if (tieneCuotaHoy) return true;
+  // Vencidos del día feriado: aparecen al día hábil siguiente sin mover calendario
+  if (opts.tieneCuotaVencida && esRecuperacionPostFeriado(ref, prestamo, feriados)) {
+    return true;
+  }
   return incluyeDiaEnFecha(ref, prestamo.dias_de_cobro, prestamo.periodicidad);
 };
 
@@ -144,4 +183,6 @@ module.exports = {
   debeIncluirEnAgenda,
   tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
+  esRecuperacionPostFeriado,
+  siguienteDiaHabilLocal,
 };

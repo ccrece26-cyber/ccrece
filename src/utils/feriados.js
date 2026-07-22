@@ -95,11 +95,12 @@ function siguienteDiaHabil(fecha, setFeriados) {
 
 /**
  * Mueve cuotas Programada/Parcial del día feriado al siguiente hábil.
- * Solo esa cuota (ese día); no cambia el resto del plan.
+ * Solo cuotas con fecha_programada = ese día (no reescribe vencidos ni el resto del plan).
+ * Los vencidos del día de cobro se incluyen en la ruta del día siguiente sin mover fechas.
  */
 async function moverCuotasDeFeriado(conn, fechaFeriado) {
   const feriado = fechaISO(fechaFeriado);
-  if (!feriado) return { movidas: 0 };
+  if (!feriado) return { movidas: 0, movidas_exactas: 0, movidas_vencidos: 0 };
   const set = await cargarSetFeriados(conn);
   set.add(feriado);
   const destino = siguienteDiaHabil(feriado, set);
@@ -115,7 +116,6 @@ async function moverCuotasDeFeriado(conn, fechaFeriado) {
 
   let movidas = 0;
   for (const c of cuotas || []) {
-    // Evitar chocar con otra cuota el mismo día mismo préstamo
     const [dup] = await conn.execute(
       `SELECT id FROM Cuotas_Calendario
        WHERE prestamo_id = ? AND deleted_at IS NULL
@@ -135,7 +135,12 @@ async function moverCuotasDeFeriado(conn, fechaFeriado) {
     );
     movidas += 1;
   }
-  return { movidas, destino };
+  return {
+    movidas,
+    movidas_exactas: movidas,
+    movidas_vencidos: 0,
+    destino,
+  };
 }
 
 async function ensureHistorialAnticiposTable(conn = null) {

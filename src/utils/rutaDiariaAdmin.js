@@ -264,6 +264,10 @@ async function loadAgendaAdminHoy(opciones = {}) {
         debeIncluirEnAgenda(hoy, p, {
           feriadosSet,
           tieneCuotaHoy,
+          tieneCuotaVencida: cuotasPrestamo.some((cc) => {
+            const f = String(cc.fecha_programada || '').slice(0, 10);
+            return f && f < hoy && ['Programada', 'Parcial'].includes(cc.estado);
+          }),
         })
       ) {
         const cuotaPend = seleccionarCuotaAgenda(

@@ -2229,11 +2229,12 @@ async function createFeriado(req, res) {
         fecha,
         nombre,
         cuotas_movidas: mov.movidas,
+        movidas_exactas: mov.movidas_exactas || mov.movidas || 0,
         destino: mov.destino,
         mensaje:
           mov.movidas > 0
-            ? `Feriado ${fecha}: ${mov.movidas} cuota(s) pasaron al ${mov.destino}.`
-            : `Feriado ${fecha} guardado. No había cuotas ese día.`,
+            ? `Feriado ${fecha}: ${mov.movidas} cuota(s) del día pasaron al ${mov.destino}. Los vencidos de ese día de cobro salen en la ruta del ${mov.destino} sin cambiar fechas.`
+            : `Feriado ${fecha} guardado. No había cuotas ese día; los vencidos de ese día de cobro se incluirán en la ruta del día hábil siguiente.`,
       },
     });
   } catch (e) {

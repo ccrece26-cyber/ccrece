@@ -2,63 +2,8 @@ const { v4: uuidv4 } = require('uuid');
 const { aplicarProrrogaEnNube } = require('./prorrogasNube');
 
 /**
- * Reparte el nuevo saldo entre cuotas Programada/Parcial (proporcional al pendiente).
- */
-async function redistribuirSaldoEnCuotasPendientes(conn, prestamoId, nuevoSaldo) {
-  const saldo = Math.max(0, Number(nuevoSaldo) || 0);
-  const [cuotas] = await conn.execute(
-    `SELECT id, monto_programado, COALESCE(monto_pagado, 0) AS monto_pagado, estado
-     FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL
-       AND estado IN ('Programada', 'Parcial')
-     ORDER BY fecha_programada ASC`,
-    [prestamoId]
-  );
-  if (!cuotas.length) return { cuotasAjustadas: 0, cuotaPorVisita: null };
-
-  const pendientes = cuotas.map((c) => ({
-    ...c,
-    pend: Math.max(0, Number((Number(c.monto_programado) - Number(c.monto_pagado || 0)).toFixed(2))),
-  }));
-  const totalPend = Number(pendientes.reduce((s, c) => s + c.pend, 0).toFixed(2));
-  if (totalPend <= 0.01) return { cuotasAjustadas: 0, cuotaPorVisita: null };
-
-  let asignado = 0;
-  for (let i = 0; i < pendientes.length; i += 1) {
-    const c = pendientes[i];
-    const esUltima = i === pendientes.length - 1;
-    let nuevoPend;
-    if (esUltima) {
-      nuevoPend = Number((saldo - asignado).toFixed(2));
-    } else {
-      nuevoPend = Number(((saldo * c.pend) / totalPend).toFixed(2));
-      asignado = Number((asignado + nuevoPend).toFixed(2));
-    }
-    if (nuevoPend < 0) nuevoPend = 0;
-    const pagado = Number(c.monto_pagado || 0);
-    const nuevoProgramado = Number((pagado + nuevoPend).toFixed(2));
-    let estado = c.estado;
-    if (nuevoPend <= 0.009) {
-      estado = 'Pagada';
-    } else if (pagado > 0.009) {
-      estado = 'Parcial';
-    } else {
-      estado = 'Programada';
-    }
-    await conn.execute(
-      `UPDATE Cuotas_Calendario SET monto_programado = ?, estado = ?, updated_at = NOW(), is_synced = 1
-       WHERE id = ?`,
-      [Math.max(pagado, nuevoProgramado), estado, c.id]
-    );
-  }
-
-  const conPend = pendientes.filter((c) => c.pend > 0.01).length || 1;
-  const cuotaPorVisita = Number((saldo / conPend).toFixed(2));
-  return { cuotasAjustadas: pendientes.length, cuotaPorVisita };
-}
-
-/**
- * Negociación admin: perdonar parte del saldo y/o dar prórroga (más tiempo, misma lógica de cuota).
+ * Negociación admin: perdonar parte del saldo y/o dar prórroga (más tiempo).
+ * Modelo flexible: actualiza solo Prestamos (+ Historial_Prorrogas); no toca Cuotas_Calendario.
  * No crea préstamo nuevo (a diferencia de renovación).
  */
 async function aplicarNegociacionVencido(conn, opts) {
@@ -93,9 +38,6 @@ async function aplicarNegociacionVencido(conn, opts) {
     if (ns >= saldoAnterior - 0.001) {
       throw new Error('El nuevo saldo debe ser menor al saldo actual para perdonar.');
     }
-    if (ns < 0.01 && semanasExtra < 1) {
-      // permitir liquidar por perdón total casi
-    }
     nuevoSaldo = Number(ns.toFixed(2));
     montoPerdonado = Number((saldoAnterior - nuevoSaldo).toFixed(2));
   } else if (montoPerdonadoIn != null && Number(montoPerdonadoIn) > 0) {
@@ -111,13 +53,9 @@ async function aplicarNegociacionVencido(conn, opts) {
   }
 
   let cuotaTrasPerdon = null;
-  let cuotasAjustadas = 0;
 
   if (montoPerdonado > 0) {
     const nuevoTotal = Number((Number(prestamo.monto_total_pagar) - montoPerdonado).toFixed(2));
-    const redist = await redistribuirSaldoEnCuotasPendientes(conn, prestamoId, nuevoSaldo);
-    cuotaTrasPerdon = redist.cuotaPorVisita;
-    cuotasAjustadas = redist.cuotasAjustadas;
 
     let diasN = 1;
     try {
@@ -128,10 +66,11 @@ async function aplicarNegociacionVencido(conn, opts) {
     } catch {
       diasN = Number(prestamo.frecuencia_semana) || 1;
     }
-    const nuevaCuotaSemanal =
-      cuotaTrasPerdon != null
-        ? Number((cuotaTrasPerdon * diasN).toFixed(2))
-        : Number(prestamo.cuota_semanal_base) || 0;
+
+    const ratio = saldoAnterior > 0.01 ? nuevoSaldo / saldoAnterior : 1;
+    const cuotaSemanalAnterior = Number(prestamo.cuota_semanal_base) || 0;
+    const nuevaCuotaSemanal = Number((cuotaSemanalAnterior * ratio).toFixed(2));
+    cuotaTrasPerdon = Number((nuevaCuotaSemanal / Math.max(1, diasN)).toFixed(2));
 
     await conn.execute(
       `UPDATE Prestamos SET
@@ -189,7 +128,7 @@ async function aplicarNegociacionVencido(conn, opts) {
     nuevo_saldo: Number(p.saldo_pendiente),
     monto_total_pagar: Number(p.monto_total_pagar),
     semanas_extra: semanasExtra,
-    cuotas_ajustadas: cuotasAjustadas,
+    cuotas_ajustadas: 0,
     cuota_por_visita: prorroga?.cuotaPorDiaDeCobro ?? cuotaTrasPerdon,
     cuota_semanal: prorroga?.nuevaCuotaSemanal ?? Number(p.cuota_semanal_base),
     plazo_semanas: Number(p.plazo_semanas),
@@ -198,9 +137,9 @@ async function aplicarNegociacionVencido(conn, opts) {
       montoPerdonado > 0 && semanasExtra >= 1
         ? `Perdón C$ ${montoPerdonado.toFixed(2)} + ${semanasExtra} sem. de prórroga.`
         : montoPerdonado > 0
-          ? `Perdón C$ ${montoPerdonado.toFixed(2)}. Nuevo saldo C$ ${Number(p.saldo_pendiente).toFixed(2)}.`
-          : `Prórroga de ${semanasExtra} semana(s) aplicada.`,
+          ? `Perdón C$ ${montoPerdonado.toFixed(2)} aplicado.`
+          : `Prórroga de ${semanasExtra} sem. aplicada.`,
   };
 }
 
-module.exports = { aplicarNegociacionVencido, redistribuirSaldoEnCuotasPendientes };
+module.exports = { aplicarNegociacionVencido };

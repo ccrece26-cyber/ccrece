@@ -6,6 +6,7 @@ const TABLAS_PULL = [
   'Garantias',
   'Prestamos',
   'Prestamo_Garantias',
+  // Histórico/opcional: se puede seguir bajando, pero ya no es verdad contable.
   'Cuotas_Calendario',
   'Parametros_Globales',
   'Feriados',

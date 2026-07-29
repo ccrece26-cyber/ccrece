@@ -1,4 +1,7 @@
-/** Residuo menor a C$1 por redondeo de cuotas — se absorbe automáticamente. */
+/** Residuo menor a C$1 por redondeo de cuotas — se absorbe automáticamente.
+ * DEPRECATED para contabilidad: el modelo flexible usa saldo + Pagos.
+ * Estas helpers quedan por compatibilidad con scripts históricos / sync legacy.
+ */
 const UMBRAL_RESIDUO_CUOTA = 1;
 
 const { toFechaISO } = require('./zonaHoraria');
@@ -212,22 +215,10 @@ async function sincronizarCuotasTrasCierrePagado(conn, prestamoId) {
 }
 
 function montoCobroDelDia(cuotaPend, prestamo, montoVisitaHoyFn) {
-  const visitaTeorica = montoVisitaHoyFn(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro);
-  let montoRaw = cuotaPend
-    ? pendienteCuota(cuotaPend)
-    : visitaTeorica;
-  const saldo = Number(prestamo?.saldo_pendiente || 0);
-  if (
-    cuotaPend &&
-    visitaTeorica >= 5 &&
-    saldo >= visitaTeorica &&
-    esRemanenteParcialAgenda(cuotaPend, visitaTeorica)
-  ) {
-    montoRaw = visitaTeorica;
-  } else if (saldo > 5 && montoRaw < 5 && visitaTeorica >= 5) {
-    montoRaw = visitaTeorica;
-  }
-  return montoRaw;
+  // Modelo flexible: monto sugerido = cuota_semanal_base / días (no pendiente de calendario)
+  const visitaFn = montoVisitaHoyFn || require('./diasCobro').montoVisitaHoy;
+  const visitaTeorica = visitaFn(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro);
+  return visitaTeorica;
 }
 
 module.exports = {

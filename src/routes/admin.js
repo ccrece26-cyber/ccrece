@@ -55,7 +55,7 @@ const {
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos, enriquecerPrestamosProrroga } = require('../utils/reporteVencidos');
-const { aplicarMontoACuotas, revertirMontoDeCuotas, recalcularSaldoPrestamoDesdeCuotas } = require('../utils/registrarPagoNube');
+const { recalcularSaldoPrestamoDesdePagos } = require('../utils/registrarPagoNube');
 const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix, whereCierreCalendarioDia } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
@@ -112,10 +112,10 @@ async function getKpis(req, res) {
          FROM Prestamos WHERE deleted_at IS NULL AND estado = 'Activo'`
       ),
       query(
-        `SELECT COUNT(DISTINCT p.id) AS cant FROM Prestamos p
-         JOIN Cuotas_Calendario cc ON p.id = cc.prestamo_id
-         WHERE p.estado = 'Activo' AND cc.estado = 'Programada'
-           AND cc.fecha_programada < CURDATE() AND p.deleted_at IS NULL`
+        `SELECT COUNT(*) AS cant FROM Prestamos p
+         WHERE p.estado = 'Activo' AND p.deleted_at IS NULL
+           AND p.saldo_pendiente > 0.01
+           AND DATE_ADD(DATE(p.fecha_desembolso), INTERVAL GREATEST(1, p.plazo_semanas) WEEK) < CURDATE()`
       ),
     ]);
     return res.json({
@@ -504,11 +504,8 @@ async function updatePrestamoFrecuencia(req, res) {
       `UPDATE Prestamos SET dias_de_cobro = ?, frecuencia_semana = ?, periodicidad = ?, is_synced = 1, updated_at = NOW() WHERE id = ?`,
       [diasJson, freq, freqResolved.periodicidad, id]
     );
-    await query(
-      `UPDATE Cuotas_Calendario SET monto_programado = ?, is_synced = 0
-       WHERE prestamo_id = ? AND estado IN ('Programada', 'Parcial') AND deleted_at IS NULL`,
-      [cuotaVisita, id]
-    );
+    // Modelo flexible: días de cobro solo afectan la ruta sugerida; no se reescribe calendario.
+    void cuotaVisita;
     await afterCarteraMutation();
     return res.json({
       success: true,
@@ -810,13 +807,7 @@ async function crearPrestamo(req, res) {
         p.cobrador_entrega_id || null,
       ]
     );
-    for (const cuota of p.cuotas || []) {
-      await conn.execute(
-        `INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)
-         VALUES (?, ?, ?, ?, 'Programada', 1)`,
-        [cuota.id || uuidv4(), id, cuota.fecha_programada, cuota.monto_programado]
-      );
-    }
+    // Modelo flexible: no se insertan cuotas de calendario al crear préstamo.
     const [cliRows] = await conn.execute(
       'SELECT nombre_completo, telefono FROM Clientes WHERE id = ? LIMIT 1',
       [p.cliente_id]
@@ -915,15 +906,7 @@ async function seedDemoEsteli(req, res) {
         [prestamoId, id, d.monto, plazo, tasa, cuota, total, total, JSON.stringify(['LUNES', 'MIERCOLES', 'VIERNES']), hoy]
       );
 
-      for (let s = 0; s < plazo; s++) {
-        const fecha = new Date();
-        fecha.setDate(fecha.getDate() - (plazo - s - 1) * 7);
-        await conn.execute(
-          `INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)
-           VALUES (?, ?, ?, ?, 'Programada', 1)`,
-          [uuidv4(), prestamoId, fecha.toISOString().split('T')[0], cuota]
-        );
-      }
+      // Modelo flexible: demo sin calendario de cuotas.
       creados.push({ id, nombre: nc, barrio: d.direccion });
     }
     await conn.commit();
@@ -1243,12 +1226,7 @@ async function updatePago(req, res) {
     );
 
     if (diff !== 0) {
-      if (diff > 0) {
-        await aplicarMontoACuotas(conn, pago.prestamo_id, diff);
-      } else {
-        await revertirMontoDeCuotas(conn, pago.prestamo_id, Math.abs(diff));
-      }
-      await recalcularSaldoPrestamoDesdeCuotas(conn, pago.prestamo_id);
+      await recalcularSaldoPrestamoDesdePagos(conn, pago.prestamo_id);
     }
 
     await conn.execute(
@@ -1299,19 +1277,13 @@ async function deletePago(req, res) {
       return res.status(400).json({ success: false, message: 'Monto invalido' });
     }
 
-    await revertirMontoDeCuotas(conn, pago.prestamo_id, monto);
-    const saldoNuevo = await recalcularSaldoPrestamoDesdeCuotas(conn, pago.prestamo_id);
-
-    await conn.execute(
-      `UPDATE Prestamos SET updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-      [pago.prestamo_id]
-    );
-
     await conn.execute(
       `UPDATE Pagos SET deleted_at = NOW(), updated_at = NOW(), is_synced = 1, editado_por_admin_at = NOW()
        WHERE id = ?`,
       [id]
     );
+
+    const saldoNuevo = await recalcularSaldoPrestamoDesdePagos(conn, pago.prestamo_id);
 
     await conn.execute(
       `UPDATE Solicitudes_Correccion_Cobro SET estado = 'RESUELTA', updated_at = NOW()
@@ -1411,13 +1383,7 @@ async function renovacion(req, res) {
         log.cobrador_entrega_id || entregaId,
       ]
     );
-    for (const c of np.cuotas || []) {
-      await conn.execute(
-        `INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)
-         VALUES (?, ?, ?, ?, 'Programada', 1)`,
-        [c.id || uuidv4(), np.id, c.fecha_programada, c.monto_programado]
-      );
-    }
+    // Modelo flexible: renovación no inserta Cuotas_Calendario.
     const [cliRows] = await conn.execute(
       'SELECT nombre_completo, telefono FROM Clientes WHERE id = ? LIMIT 1',
       [np.cliente_id]

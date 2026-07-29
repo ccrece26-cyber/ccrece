@@ -161,32 +161,7 @@ async function enriquecerPrestamosProrroga(rows) {
   const ids = (rows || []).map((p) => p.id).filter(Boolean);
   const histMap = await cargarHistorialProrrogas(ids);
 
-  const proxMap = new Map();
-  if (ids.length) {
-    const ph = ids.map(() => '?').join(',');
-    const proximas = await query(
-      `SELECT cc.prestamo_id, cc.id AS cuota_id, cc.fecha_programada,
-              cc.monto_programado, cc.monto_pagado, cc.estado
-       FROM Cuotas_Calendario cc
-       INNER JOIN (
-         SELECT prestamo_id, MIN(fecha_programada) AS fmin
-         FROM Cuotas_Calendario
-         WHERE deleted_at IS NULL
-           AND estado IN ('Programada', 'Parcial')
-           AND prestamo_id IN (${ph})
-         GROUP BY prestamo_id
-       ) t ON t.prestamo_id = cc.prestamo_id AND t.fmin = cc.fecha_programada
-       WHERE cc.deleted_at IS NULL
-         AND cc.estado IN ('Programada', 'Parcial')
-         AND cc.prestamo_id IN (${ph})`,
-      [...ids, ...ids]
-    );
-    for (const c of proximas || []) {
-      if (proxMap.has(c.prestamo_id)) continue;
-      proxMap.set(c.prestamo_id, c);
-    }
-  }
-
+  // Modelo flexible: próxima visita sugerida por cuota_semanal_base / días (sin calendario).
   return (rows || []).map((p) => {
     const dias = parseDias(p.dias_de_cobro);
     const desembolso = fechaISO(p.fecha_desembolso);
@@ -197,11 +172,12 @@ async function enriquecerPrestamosProrroga(rows) {
     const vencido = !!(venc && hoy >= venc);
     const hist = histMap.get(p.id) || [];
     const semanas_prorroga_total = hist.reduce((s, h) => s + (Number(h.semanas_extra) || 0), 0);
-    const prox = proxMap.get(p.id);
-    const proxFecha = prox ? fechaISO(prox.fecha_programada) : null;
-    const proxPend = prox
-      ? Math.max(0, Number((Number(prox.monto_programado) - Number(prox.monto_pagado || 0)).toFixed(2)))
-      : null;
+    const cuotaSemanal = Number(p.cuota_semanal_base) || 0;
+    const freq = Math.max(1, dias.length || 1);
+    const montoSugerido = Math.min(
+      Number(p.saldo_pendiente) || 0,
+      Number((cuotaSemanal / freq).toFixed(2))
+    );
     return {
       id: p.id,
       cliente_id: p.cliente_id,
@@ -212,7 +188,7 @@ async function enriquecerPrestamosProrroga(rows) {
       monto_desembolsado: Number(p.monto_desembolsado),
       monto_total_pagar: Number(p.monto_total_pagar),
       saldo_pendiente: Number(p.saldo_pendiente),
-      cuota_semanal_base: Number(p.cuota_semanal_base),
+      cuota_semanal_base: cuotaSemanal,
       plazo_semanas: Number(p.plazo_semanas),
       tasa_interes_aplicada: Number(p.tasa_interes_aplicada),
       estado: p.estado,
@@ -226,9 +202,9 @@ async function enriquecerPrestamosProrroga(rows) {
       prorrogas_count: hist.length,
       semanas_prorroga_total,
       ultima_prorroga: hist[0] || null,
-      proxima_cuota_id: prox?.cuota_id || null,
-      proxima_cuota_fecha: proxFecha,
-      proxima_cuota_monto: proxPend,
+      proxima_cuota_id: null,
+      proxima_cuota_fecha: null,
+      proxima_cuota_monto: montoSugerido > 0.01 ? montoSugerido : null,
     };
   });
 }

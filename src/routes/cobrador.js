@@ -20,9 +20,8 @@ const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = requi
 const { hoyISO, toFechaISO } = require('../utils/zonaHoraria');
 const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
-const { aplicarMontoACuotas, actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../utils/registrarPagoNube');
+const { actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../utils/registrarPagoNube');
 const { capMontoAlSaldo } = require('../utils/cobroMontos');
-const { sincronizarCuotasTrasCierrePagado } = require('../utils/cuotasCalendario');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
@@ -90,18 +89,8 @@ async function rutaDiaria(req, res) {
       }
       prestamos = [...activoPorCliente.values()];
       const prestamoIds = prestamos.map((p) => p.id);
-      if (prestamoIds.length) {
-        const ph3 = prestamoIds.map(() => '?').join(',');
-        cuotas = await query(
-          `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado,
-                  estado, updated_at, deleted_at
-           FROM Cuotas_Calendario
-           WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
-             AND fecha_programada <= ? AND deleted_at IS NULL
-           ORDER BY fecha_programada`,
-          [...prestamoIds, hoy]
-        );
-      }
+      // Modelo flexible: no cargar Cuotas_Calendario para la ruta del cobrador.
+      cuotas = [];
       if (prestamoIds.length) {
         const phPg = prestamoIds.map(() => '?').join(',');
         prestamo_garantias = await query(
@@ -845,49 +834,56 @@ async function pushSync(req, res) {
     }
 
     if (cuotas.length) {
-      const existentes = new Set();
-      const idsCuota = cuotas.map((c) => c.id).filter(Boolean);
-      for (let i = 0; i < idsCuota.length; i += 200) {
-        const slice = idsCuota.slice(i, i + 200);
-        const ph = slice.map(() => '?').join(',');
-        const [rows] = await conn.execute(
-          `SELECT id FROM Cuotas_Calendario WHERE id IN (${ph})`,
-          slice
-        );
-        for (const r of rows) existentes.add(r.id);
-      }
-      const nuevas = [];
-      for (const cc of cuotas) {
-        if (existentes.has(cc.id)) {
-          synced.cuotas.push(cc.id);
-          continue;
-        }
-        nuevas.push(cc);
-      }
+      // Modelo flexible: cuotas ya no son críticas. Se aceptan si llegan (apps viejas),
+      // pero un fallo aquí no debe tumbar el sync de pagos/préstamos.
       try {
-        await insertMany(
-          conn,
-          {
-            insert:
-              'INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)',
-            placeholder: '(?, ?, ?, ?, ?, 1)',
-            values: (cc) => [
-              cc.id,
-              cc.prestamo_id,
-              cc.fecha_programada,
-              cc.monto_programado,
-              cc.estado || 'Programada',
-            ],
-          },
-          nuevas,
-          120
-        );
-        for (const cc of nuevas) {
-          synced.cuotas.push(cc.id);
-          procesados += 1;
+        const existentes = new Set();
+        const idsCuota = cuotas.map((c) => c.id).filter(Boolean);
+        for (let i = 0; i < idsCuota.length; i += 200) {
+          const slice = idsCuota.slice(i, i + 200);
+          const ph = slice.map(() => '?').join(',');
+          const [rows] = await conn.execute(
+            `SELECT id FROM Cuotas_Calendario WHERE id IN (${ph})`,
+            slice
+          );
+          for (const r of rows) existentes.add(r.id);
+        }
+        const nuevas = [];
+        for (const cc of cuotas) {
+          if (existentes.has(cc.id)) {
+            synced.cuotas.push(cc.id);
+            continue;
+          }
+          nuevas.push(cc);
+        }
+        if (nuevas.length) {
+          await insertMany(
+            conn,
+            {
+              insert:
+                'INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, estado, is_synced)',
+              placeholder: '(?, ?, ?, ?, ?, 1)',
+              values: (cc) => [
+                cc.id,
+                cc.prestamo_id,
+                cc.fecha_programada,
+                cc.monto_programado,
+                cc.estado || 'Programada',
+              ],
+            },
+            nuevas,
+            120
+          );
+          for (const cc of nuevas) {
+            synced.cuotas.push(cc.id);
+            procesados += 1;
+          }
         }
       } catch (err) {
-        errores.push({ tipo: 'cuota_bulk', id: null, message: err.message });
+        console.warn('[sync] Cuotas_Calendario ignoradas (no críticas):', err.message);
+        for (const cc of cuotas) {
+          if (cc?.id) synced.cuotas.push(cc.id);
+        }
       }
     }
 
@@ -1081,7 +1077,6 @@ async function pushSync(req, res) {
           ]
         );
 
-        await aplicarMontoACuotas(conn, prestamoIdPago, montoEfectivo);
         await actualizarPrestamoTrasCobro(conn, prestamoIdPago, {
           esLiquidacion,
           prestamo,
@@ -1446,14 +1441,7 @@ async function cargarCorreccionesAdmin(cobradorId, desde) {
     prestamoIds
   );
 
-  const cuotas = await query(
-    `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado,
-            estado, cobrador_id, updated_at
-     FROM Cuotas_Calendario
-     WHERE prestamo_id IN (${ph}) AND deleted_at IS NULL
-     ORDER BY fecha_programada ASC`,
-    prestamoIds
-  );
+  const cuotas = []; // Histórico opcional: pull de cartera ya no exige calendario.
 
   return { pagos, prestamos, cuotas };
 }

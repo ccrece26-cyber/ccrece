@@ -98,16 +98,9 @@ async function loadAgendaAdminHoy(opciones = {}) {
         if (!activoPorCliente.has(p.cliente_id)) activoPorCliente.set(p.cliente_id, p);
       }
       prestamos = [...activoPorCliente.values()];
-      const prestamoIds = prestamos.map((p) => p.id);
-      if (prestamoIds.length) {
-        const ph3 = prestamoIds.map(() => '?').join(',');
-        cuotas = await query(
-          `SELECT * FROM Cuotas_Calendario
-           WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
-             AND fecha_programada <= ? AND deleted_at IS NULL
-           ORDER BY fecha_programada`,
-          [...prestamoIds, hoy]
-        );
+      // Modelo flexible: no cargar Cuotas_Calendario para la ruta admin.
+      cuotas = [];
+      if (prestamos.length) {
         const fiadorIds = [...new Set(prestamos.map((p) => p.fiador_id).filter(Boolean))];
         if (fiadorIds.length) {
           const phF = fiadorIds.map(() => '?').join(',');

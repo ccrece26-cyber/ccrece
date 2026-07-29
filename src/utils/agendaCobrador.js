@@ -2,8 +2,6 @@ const {
   montoVisitaHoy,
   normalizarDia,
   debeIncluirEnAgenda,
-  tieneCuotaProgramadaEnFecha,
-  esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('./diasCobro');
 const { cargarSetFeriados } = require('./feriados');
@@ -12,10 +10,6 @@ const { analizarVisitaGps, resumenGpsAgenda, refCoordsCliente } = require('./gps
 const { etiquetaVisitaDesdePago } = require('./visitaEtiquetas');
 const { anotarTiemposVisitas, resumenTiemposRuta } = require('./tiemposVisita');
 const { capMontoAlSaldo } = require('./cobroMontos');
-const {
-  seleccionarCuotaAgenda,
-  montoCobroDelDia,
-} = require('./cuotasCalendario');
 
 const MAPA = ['DOMINGO', 'LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO'];
 
@@ -45,6 +39,13 @@ function esVisitaCobrada(estado) {
   return estado === 'cobrado' || estado === 'cobrado_admin';
 }
 
+function montoSugeridoVisita(prestamo) {
+  const raw = montoVisitaHoy(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro, {
+    periodicidad: prestamo?.periodicidad,
+  });
+  return capMontoAlSaldo(raw, prestamo?.saldo_pendiente);
+}
+
 function armarAgendaDesdeDatos(
   hoy,
   clientes,
@@ -70,13 +71,16 @@ function armarAgendaDesdeDatos(
     ...new Set(pagosRuta.map((pg) => pg.prestamo_id).filter((id) => id && !prestamoPorId.has(id))),
   ];
 
-  const pushAgendaItem = (c, p, cuotaPend, extra = {}) => {
+  const pushAgendaItem = (c, p, extra = {}) => {
     if (!p?.id || prestamosEnAgenda.has(p.id)) return;
     prestamosEnAgenda.add(p.id);
     const pg = pagoPorPrestamo.get(p.id);
     const gest = gestionPorPrestamo.get(p.id);
-    const montoDiaRaw = montoCobroDelDia(cuotaPend, p, montoVisitaHoy);
-    const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
+    const tocaHoy =
+      extra.toca_hoy != null
+        ? !!extra.toca_hoy
+        : debeIncluirEnAgenda(hoy, p, { feriadosSet, tieneCuotaHoy: false, tieneCuotaVencida: false });
+    const montoDia = montoSugeridoVisita(p);
 
     const esLiquidacion =
       extra.tipo_visita === 'liquidado' ||
@@ -104,11 +108,15 @@ function armarAgendaDesdeDatos(
     if (!etiqueta_visita && pg) {
       etiqueta_visita = etiquetaVisitaDesdePago(pg, esLiquidacion);
     }
+    if (!etiqueta_visita && !pg && !tocaHoy) {
+      etiqueta_visita = 'Fuera de día';
+    }
 
     const ref = refCoordsCliente(c);
     agenda.push({
       prestamo_id: p.id,
       monto_programado,
+      monto_sugerido: montoDia,
       monto_cobrado,
       cliente_id: c.id,
       nombre_completo: c.nombre_completo,
@@ -117,6 +125,10 @@ function armarAgendaDesdeDatos(
       cedula: c.cedula,
       orden_visita: c.orden_visita,
       saldo_pendiente: p.saldo_pendiente,
+      cuota_semanal_base: p.cuota_semanal_base,
+      dias_de_cobro: p.dias_de_cobro,
+      toca_hoy: tocaHoy,
+      fuera_de_dia: !tocaHoy,
       tipo_visita,
       estado_visita,
       registrado_por_admin: pg ? Number(pg.registrado_por_admin) === 1 : false,
@@ -139,36 +151,16 @@ function armarAgendaDesdeDatos(
     });
   };
 
+  // Modelo flexible: toda la cartera activa de la ruta; días solo priorizan/sugieren.
   for (const c of clientes) {
     const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
     if (!p) continue;
-    const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
-    const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
-      cuotasPrestamo,
-      p.id,
-      hoy,
-      esCuotaDiaDesembolso,
-      p
-    );
-    if (
-      debeIncluirEnAgenda(hoy, p, {
-        feriadosSet,
-        tieneCuotaHoy,
-        tieneCuotaVencida: cuotasPrestamo.some((cc) => {
-          const f = String(cc.fecha_programada || '').slice(0, 10);
-          return f && f < hoy && ['Programada', 'Parcial'].includes(cc.estado);
-        }),
-      })
-    ) {
-      const cuotaPend = seleccionarCuotaAgenda(
-        cuotasPrestamo,
-        p,
-        hoy,
-        esCuotaDiaDesembolso,
-        montoVisitaHoy
-      );
-      pushAgendaItem(c, p, cuotaPend);
-    }
+    const tocaHoy = debeIncluirEnAgenda(hoy, p, {
+      feriadosSet,
+      tieneCuotaHoy: false,
+      tieneCuotaVencida: false,
+    });
+    pushAgendaItem(c, p, { toca_hoy: tocaHoy });
 
     for (const pg of pagosRuta.filter((x) => x.cliente_id === c.id)) {
       if (prestamosEnAgenda.has(pg.prestamo_id)) continue;
@@ -176,18 +168,21 @@ function armarAgendaDesdeDatos(
       if (!pr) continue;
       const esLiquidacion = pr.estado === 'Pagado' || Number(pr.saldo_pendiente || 0) <= 0;
       const ev = estadoVisitaDesdePago(pg);
-      pushAgendaItem(c, pr, null, {
+      pushAgendaItem(c, pr, {
         monto_programado: Number(pg.monto_pagado),
         monto_cobrado: Number(pg.monto_pagado),
         tipo_visita: esLiquidacion ? 'liquidado' : 'cobrado',
         etiqueta_visita: etiquetaVisitaDesdePago(pg, esLiquidacion),
         estado_visita: ev,
         pago_hoy_id: pg.id,
+        toca_hoy: true,
       });
     }
   }
 
   agenda.sort((a, b) => {
+    // Primero quienes toca hoy (sugeridos), luego fuera de día
+    if (!!a.toca_hoy !== !!b.toca_hoy) return a.toca_hoy ? -1 : 1;
     const o = (a.orden_visita ?? 999) - (b.orden_visita ?? 999);
     if (o !== 0) return o;
     return String(a.prestamo_id).localeCompare(String(b.prestamo_id));
@@ -200,6 +195,7 @@ function armarAgendaDesdeDatos(
   const liquidado = agendaConTiempos.filter((v) => v.tipo_visita === 'liquidado').length;
   const no_pago = agendaConTiempos.filter((v) => v.estado_visita === 'no_pago').length;
   const pendiente = agendaConTiempos.filter((v) => v.estado_visita === 'pendiente').length;
+  const sugeridos_hoy = agendaConTiempos.filter((v) => v.toca_hoy && v.estado_visita === 'pendiente').length;
   const total = agendaConTiempos.length;
   const visitadas = cobrado + no_pago;
   const monto_cobrado = pagosRuta.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
@@ -212,6 +208,7 @@ function armarAgendaDesdeDatos(
       liquidado,
       no_pago,
       pendiente,
+      sugeridos_hoy,
       visitadas,
       porcentaje: total ? Math.round((visitadas / total) * 100) : 0,
       monto_cobrado,
@@ -256,19 +253,8 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
       if (!activoPorCliente.has(p.cliente_id)) activoPorCliente.set(p.cliente_id, p);
     }
     prestamos = [...activoPorCliente.values()];
-    const prestamoIds = prestamos.map((p) => p.id);
-    if (prestamoIds.length) {
-      const ph3 = prestamoIds.map(() => '?').join(',');
-      cuotas = await query(
-        `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado,
-                estado, updated_at, deleted_at
-         FROM Cuotas_Calendario
-         WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
-           AND fecha_programada <= ? AND deleted_at IS NULL
-         ORDER BY fecha_programada`,
-        [...prestamoIds, hoy]
-      );
-    }
+    // Modelo flexible: agenda ya no depende de Cuotas_Calendario.
+    cuotas = [];
     const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
     pagos_hoy = await query(
       `SELECT pg.*, p.cliente_id
@@ -342,17 +328,8 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
     }
     prestamos = [...activoPorCliente.values()];
 
-    const prestamoIds = prestamos.map((p) => p.id);
-    if (prestamoIds.length) {
-      const ph3 = prestamoIds.map(() => '?').join(',');
-      cuotas = await query(
-        `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado, estado
-         FROM Cuotas_Calendario
-         WHERE prestamo_id IN (${ph3}) AND estado IN ('Programada','Parcial')
-           AND fecha_programada <= ? AND deleted_at IS NULL`,
-        [...prestamoIds, hoy]
-      );
-    }
+    // Modelo flexible: no cargar Cuotas_Calendario para cumplimiento.
+    cuotas = [];
 
     const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
     pagos_hoy = await query(

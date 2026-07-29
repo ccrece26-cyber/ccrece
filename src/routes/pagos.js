@@ -1,12 +1,12 @@
 const { getConnection } = require('../config/db');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
-const { aplicarMontoACuotas, recalcularSaldoPrestamoDesdeCuotas } = require('../utils/registrarPagoNube');
-const { voidarCuotasRestantesAlCerrar } = require('../utils/cobroMontos');
+const { actualizarPrestamoTrasCobro } = require('../utils/registrarPagoNube');
 const { rangoDiaLocal } = require('../utils/fechasSql');
 
 /**
  * @deprecated Prefer POST /api/cobrador/sync/push (cobradorEngine en la app).
  * Recibe lote de pagos offline desde SQLite y los persiste en TiDB Cloud.
+ * Modelo flexible: solo saldo + Pagos (sin Cuotas_Calendario).
  */
 async function syncMasivo(req, res) {
   const { pagos } = req.body;
@@ -38,7 +38,7 @@ async function syncMasivo(req, res) {
       }
 
       const [prestamoOk] = await conn.execute(
-        'SELECT id, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+        'SELECT * FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
         [pago.prestamo_id]
       );
       if (!prestamoOk.length) {
@@ -79,11 +79,11 @@ async function syncMasivo(req, res) {
         ]
       );
 
-      await aplicarMontoACuotas(conn, pago.prestamo_id, monto);
-      const nuevoSaldo = await recalcularSaldoPrestamoDesdeCuotas(conn, pago.prestamo_id);
-      if (nuevoSaldo <= 0.01) {
-        await voidarCuotasRestantesAlCerrar(conn, pago.prestamo_id);
-      }
+      await actualizarPrestamoTrasCobro(conn, pago.prestamo_id, {
+        esLiquidacion: false,
+        prestamo,
+        montoEfectivo: monto,
+      });
 
       procesados += 1;
     }

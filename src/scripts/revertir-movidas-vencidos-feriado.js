@@ -1,4 +1,8 @@
 /**
+ * DEPRECATED (modelo flexible saldo + pagos):
+ * Movía fechas de Cuotas_Calendario por feriados. La ruta ya no depende del calendario.
+ * Conservar como histórico.
+ *
  * Revierte las cuotas de "vencidos" movidas al aplicar feriado 2026-07-20
  * (script reaplicar-feriado-vencidos): volvían a adelantar la más antigua a 2026-07-21.
  *

@@ -7,6 +7,10 @@ function n(v) {
   return Number(v || 0);
 }
 
+/**
+ * Modelo flexible: solo saldo vs sum(Pagos).
+ * El calendario de cuotas ya no genera hallazgos.
+ */
 async function auditarSaldosActivos() {
   const rows = await query(
     `SELECT p.id, c.cedula, c.nombre_completo, p.estado,
@@ -14,14 +18,7 @@ async function auditarSaldosActivos() {
             (SELECT COALESCE(SUM(monto_pagado), 0) FROM Pagos pg
              WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS total_pagos,
             (SELECT COUNT(*) FROM Pagos pg
-             WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS n_pagos,
-            (SELECT COALESCE(SUM(cc.monto_pagado), 0) FROM Cuotas_Calendario cc
-             WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL) AS sum_cuotas_pagado,
-            (SELECT COUNT(*) FROM Cuotas_Calendario cc
-             WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL
-               AND (cc.estado = 'Pagada' OR cc.monto_pagado >= cc.monto_programado - 0.01)) AS cuotas_pagadas,
-            (SELECT COUNT(*) FROM Cuotas_Calendario cc
-             WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL) AS cuotas_total
+             WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS n_pagos
      FROM Prestamos p
      JOIN Clientes c ON p.cliente_id = c.id
      WHERE p.deleted_at IS NULL AND c.deleted_at IS NULL AND p.estado = 'Activo'
@@ -36,9 +33,7 @@ async function auditarSaldosActivos() {
     const saldo = n(r.saldo_pendiente);
     const totalPagos = n(r.total_pagos);
     const saldoPorPagos = Math.max(0, Number((total - totalPagos).toFixed(2)));
-    const saldoPorCalendario = Math.max(0, Number((total - n(r.sum_cuotas_pagado)).toFixed(2)));
     const diffPagos = Number((saldo - saldoPorPagos).toFixed(2));
-    const diffCalendario = Number((saldo - saldoPorCalendario).toFixed(2));
 
     const issues = [];
 
@@ -51,11 +46,6 @@ async function auditarSaldosActivos() {
         `Saldo vs pagos: registrado C$ ${saldo.toFixed(2)}, esperado C$ ${saldoPorPagos.toFixed(2)} (diff C$ ${diffPagos.toFixed(2)})`
       );
     }
-    if (Math.abs(diffCalendario) > TOLERANCIA) {
-      issues.push(
-        `Saldo vs calendario: registrado C$ ${saldo.toFixed(2)}, por cuotas C$ ${saldoPorCalendario.toFixed(2)} (diff C$ ${diffCalendario.toFixed(2)})`
-      );
-    }
 
     const item = {
       prestamo_id: r.id,
@@ -65,11 +55,7 @@ async function auditarSaldosActivos() {
       total,
       total_pagos: totalPagos,
       n_pagos: Number(r.n_pagos),
-      sum_cuotas: n(r.sum_cuotas_pagado),
-      cuotas_pagadas: Number(r.cuotas_pagadas),
-      cuotas_total: Number(r.cuotas_total),
       saldo_esperado_pagos: saldoPorPagos,
-      saldo_esperado_cuotas: saldoPorCalendario,
       issues,
     };
 
@@ -112,28 +98,6 @@ async function auditarPagosDuplicadosHoy() {
      HAVING COUNT(*) > 1
      ORDER BY dia DESC, c.nombre_completo
      LIMIT 50`
-  );
-}
-
-async function auditarPagosVsCuotas() {
-  return query(
-    `SELECT p.id AS prestamo_id, c.cedula, c.nombre_completo, p.estado,
-            (SELECT COALESCE(SUM(monto_pagado),0) FROM Pagos pg
-             WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS sum_pagos,
-            (SELECT COALESCE(SUM(monto_pagado),0) FROM Cuotas_Calendario cc
-             WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL) AS sum_cuotas,
-            ABS(
-              (SELECT COALESCE(SUM(monto_pagado),0) FROM Pagos pg
-               WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL)
-              - (SELECT COALESCE(SUM(monto_pagado),0) FROM Cuotas_Calendario cc
-                 WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL)
-            ) AS diff
-     FROM Prestamos p
-     JOIN Clientes c ON p.cliente_id = c.id
-     WHERE p.deleted_at IS NULL AND c.deleted_at IS NULL AND p.estado IN ('Activo','Pagado')
-     HAVING diff > ${TOLERANCIA}
-     ORDER BY diff DESC
-     LIMIT 40`
   );
 }
 
@@ -218,7 +182,6 @@ async function runAuditoriaIntegridad() {
   const resumen = await resumenGeneral();
   const saldos = await auditarSaldosActivos();
   const estados = await auditarEstadosPrestamos();
-  const pagosCuotas = await auditarPagosVsCuotas();
   const dupPagos = await auditarPagosDuplicadosHoy();
   const rutas = await auditarRutasClientes();
   const multiActivos = await auditarClientesMultiplesActivos();
@@ -227,7 +190,6 @@ async function runAuditoriaIntegridad() {
   const problemas =
     saldos.criticos.length +
     estados.length +
-    pagosCuotas.length +
     dupPagos.length +
     rutas.dupes.length +
     rutas.desalineados.length +
@@ -242,6 +204,7 @@ async function runAuditoriaIntegridad() {
     tolerancia: TOLERANCIA,
     calificacion,
     problemas_total: problemas,
+    modelo: 'saldo_y_pagos',
     resumen: {
       clientes: n(resumen.clientes),
       prestamos_activos: n(resumen.prestamos_activos),
@@ -255,7 +218,8 @@ async function runAuditoriaIntegridad() {
     },
     saldos_activos: saldos,
     estados_inconsistentes: estados,
-    pagos_vs_cuotas: pagosCuotas,
+    /** Compat UI: vacío (calendario ya no se audita) */
+    pagos_vs_cuotas: [],
     pagos_duplicados_dia: dupPagos,
     rutas: {
       clientes_en_varias_rutas: rutas.dupes,

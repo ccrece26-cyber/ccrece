@@ -15,16 +15,7 @@ function parseDocumentoTipo(raw) {
 }
 const { reserveClienteIds, initSecuenciaCliente, parseCodigoCliente, asegurarSecuenciaAlMenos } = require('./clienteId');
 const { insertMany, updateManyById } = require('./bulkSql');
-const { aplicarMontoACuotas, recalcularSaldoPrestamoDesdeCuotas } = require('./registrarPagoNube');
-const {
-  normalizarAbonoCuota,
-  absorberResiduosCuotasEnMemoria,
-  absorberResiduosCuotas,
-  calcularToleranciaReconciliacionCuotas,
-  reconciliarCuotasConPagosInMemoria,
-  reconciliarCuotasConPagos,
-  sincronizarCuotasTrasCierrePagado,
-} = require('./cuotasCalendario');
+const { recalcularSaldoPrestamoDesdePagos } = require('./registrarPagoNube');
 const {
   parseTasaMensualInput,
   calcularCuotaYDistribucion,
@@ -398,39 +389,12 @@ function calcularPreview(fila) {
   };
 }
 
-function aplicarMontoACuotasInMemoria(cuotas, monto) {
-  let restante = Number(monto);
-  for (const cuota of cuotas) {
-    if (restante <= 0) break;
-    if (!['Programada', 'Parcial'].includes(cuota.estado)) continue;
-    const pendiente = Math.max(
-      0,
-      Number((Number(cuota.monto_programado) - Number(cuota.monto_pagado || 0)).toFixed(2))
-    );
-    if (pendiente <= 0) continue;
-    const abono = Math.min(restante, pendiente);
-    const { monto_pagado: nuevoPagado, estado } = normalizarAbonoCuota(cuota, abono);
-    cuota.monto_pagado = nuevoPagado;
-    cuota.estado = estado;
-    restante = Number((restante - abono).toFixed(2));
-  }
-  absorberResiduosCuotasEnMemoria(cuotas);
-}
-
-async function cuadrarPrestamoDesdeCalendario(conn, prestamoId) {
-  await conn.execute(
-    `UPDATE Prestamos SET monto_total_pagar = (
-       SELECT COALESCE(SUM(monto_programado), 0) FROM Cuotas_Calendario
-       WHERE prestamo_id = ? AND deleted_at IS NULL
-     ), updated_at = NOW(), is_synced = 1
-     WHERE id = ?`,
-    [prestamoId, prestamoId]
-  );
-  await recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
+async function cuadrarPrestamoDesdePagos(conn, prestamoId) {
+  await recalcularSaldoPrestamoDesdePagos(conn, prestamoId);
 }
 
 async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 1.5) {
-  await cuadrarPrestamoDesdeCalendario(conn, prestamoId);
+  await cuadrarPrestamoDesdePagos(conn, prestamoId);
   const [rows] = await conn.execute(
     `SELECT monto_total_pagar, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
     [prestamoId]
@@ -443,23 +407,12 @@ async function verificarCuadrePrestamo(conn, prestamoId, tolerancia = 1.5) {
      WHERE prestamo_id = ? AND deleted_at IS NULL`,
     [prestamoId]
   );
-  const [cuotasRow] = await conn.execute(
-    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
   const sumPagos = Number(pagosRow[0]?.t || 0);
-  const sumCuotas = Number(cuotasRow[0]?.t || 0);
   const saldoEsperado = Math.max(0, Number((total - sumPagos).toFixed(2)));
 
   if (Math.abs(saldo - saldoEsperado) > tolerancia) {
     throw new Error(
       `Descuadre saldo vs pagos: saldo C$ ${saldo.toFixed(2)}, esperado C$ ${saldoEsperado.toFixed(2)}`
-    );
-  }
-  if (Math.abs(sumPagos - sumCuotas) > tolerancia) {
-    throw new Error(
-      `Descuadre pagos vs cuotas: pagos C$ ${sumPagos.toFixed(2)}, cuotas C$ ${sumCuotas.toFixed(2)}`
     );
   }
 }
@@ -477,25 +430,7 @@ async function aplicarPagoHistoricoImportacion(conn, item) {
      VALUES (?, ?, ?, ?, ?, 0, 0, 1, ?, 1)`,
     [pagoId, prestamoId, cobradorId, monto, fechaPago, cobradorId]
   );
-  await aplicarMontoACuotas(conn, prestamoId, monto, fecha);
-  const [prestRows] = await conn.execute(
-    `SELECT monto_total_pagar FROM Prestamos WHERE id = ? LIMIT 1`,
-    [prestamoId]
-  );
-  const [cuotasRows] = await conn.execute(
-    `SELECT monto_programado, monto_pagado FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
-  const tol = calcularToleranciaReconciliacionCuotas(prestRows[0]?.monto_total_pagar, cuotasRows);
-  await reconciliarCuotasConPagos(conn, prestamoId, tol);
-
-  const [pagosRow] = await conn.execute(
-    `SELECT COALESCE(SUM(monto_pagado), 0) AS t FROM Pagos
-     WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
-  await recalcularSaldoPrestamoDesdeCuotas(conn, prestamoId);
+  await recalcularSaldoPrestamoDesdePagos(conn, prestamoId);
   await verificarCuadrePrestamo(conn, prestamoId);
 }
 
@@ -626,28 +561,6 @@ async function precargarClientesConCreditoActivo(conn, clienteIds) {
   return set;
 }
 
-async function precargarCuotasPorPrestamos(conn, prestamoIds) {
-  const map = new Map();
-  if (!prestamoIds.length) return map;
-  const CHUNK = 40;
-  for (let i = 0; i < prestamoIds.length; i += CHUNK) {
-    const slice = prestamoIds.slice(i, i + CHUNK);
-    const ph = slice.map(() => '?').join(',');
-    const [rows] = await conn.execute(
-      `SELECT id, prestamo_id, fecha_programada, monto_programado, monto_pagado, estado
-       FROM Cuotas_Calendario
-       WHERE prestamo_id IN (${ph}) AND deleted_at IS NULL
-       ORDER BY prestamo_id, fecha_programada ASC`,
-      slice
-    );
-    for (const r of rows) {
-      if (!map.has(r.prestamo_id)) map.set(r.prestamo_id, []);
-      map.get(r.prestamo_id).push({ ...r });
-    }
-  }
-  return map;
-}
-
 async function verificarCuadrePrestamosBulk(conn, prestamoIds, tolerancia = 1.5) {
   if (!prestamoIds.length) return;
   const CHUNK = 50;
@@ -657,9 +570,7 @@ async function verificarCuadrePrestamosBulk(conn, prestamoIds, tolerancia = 1.5)
     const [rows] = await conn.execute(
       `SELECT p.id, p.monto_total_pagar, p.saldo_pendiente,
               (SELECT COALESCE(SUM(monto_pagado), 0) FROM Pagos pg
-               WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS sum_pagos,
-              (SELECT COALESCE(SUM(monto_pagado), 0) FROM Cuotas_Calendario cc
-               WHERE cc.prestamo_id = p.id AND cc.deleted_at IS NULL) AS sum_cuotas
+               WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL) AS sum_pagos
        FROM Prestamos p
        WHERE p.id IN (${ph}) AND p.deleted_at IS NULL`,
       slice
@@ -668,16 +579,10 @@ async function verificarCuadrePrestamosBulk(conn, prestamoIds, tolerancia = 1.5)
       const total = Number(r.monto_total_pagar);
       const saldo = Number(r.saldo_pendiente);
       const sumPagos = Number(r.sum_pagos || 0);
-      const sumCuotas = Number(r.sum_cuotas || 0);
       const saldoEsperado = Math.max(0, Number((total - sumPagos).toFixed(2)));
       if (Math.abs(saldo - saldoEsperado) > tolerancia) {
         throw new Error(
           `Descuadre saldo vs pagos (${r.id}): saldo C$ ${saldo.toFixed(2)}, esperado C$ ${saldoEsperado.toFixed(2)}`
-        );
-      }
-      if (Math.abs(sumPagos - sumCuotas) > tolerancia) {
-        throw new Error(
-          `Descuadre pagos vs cuotas (${r.id}): pagos C$ ${sumPagos.toFixed(2)}, cuotas C$ ${sumCuotas.toFixed(2)}`
         );
       }
     }
@@ -710,27 +615,6 @@ async function precargarRutas(conn, cobradorIds, mapa) {
     cache.set(cobId, rutaId);
   }
   return cache;
-}
-
-async function insertarCuotasBulk(conn, cuotasRows) {
-  return insertMany(
-    conn,
-    {
-      insert:
-        'INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, monto_pagado, estado, is_synced)',
-      placeholder: '(?, ?, ?, ?, ?, ?, 1)',
-      values: (c) => [
-        c.id,
-        c.prestamo_id,
-        c.fecha_programada,
-        c.monto_programado,
-        c.monto_pagado ?? 0,
-        c.estado,
-      ],
-    },
-    cuotasRows,
-    150
-  );
 }
 
 async function precargarIdsCliente(conn, ids) {
@@ -820,7 +704,6 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
   const clientesInsert = [];
   const clientesUpdate = [];
   const prestamosInsert = [];
-  const cuotasBuffer = [];
   const rutaClientes = [];
   const pendientesPago = [];
   const exitos = [];
@@ -830,6 +713,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
   for (const fila of preparadas) {
     const { fin, agenda, saldo_pendiente: saldo, monto_pagado_historico, fecha_ultimo_abono } =
       resolverImportacionFinanciera(fila);
+    void agenda;
 
     let clienteId = fila.cedula ? cedulaMap.get(fila.cedula) : null;
     let clienteNuevo = false;
@@ -894,16 +778,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       fecha_desembolso: fila.fecha_desembolso,
     });
 
-    for (const c of agenda) {
-      cuotasBuffer.push({
-        id: uuidv4(),
-        prestamo_id: prestamoId,
-        fecha_programada: c.fecha_programada,
-        monto_programado: c.monto_programado,
-        monto_pagado: 0,
-        estado: 'Programada',
-      });
-    }
+    // Modelo flexible: no se genera Cuotas_Calendario.
 
     const rutaId = rutaCache.get(fila.cobrador_id);
     let orden =
@@ -1027,7 +902,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     80
   );
 
-  await insertarCuotasBulk(conn, cuotasBuffer);
+  // Modelo flexible: no se genera calendario de cuotas (ruta usa dias_de_cobro).
 
   const clienteIdsRuta = [...new Set(rutaClientes.map((r) => r.cliente_id))];
   if (clienteIdsRuta.length) {
@@ -1085,13 +960,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       100
     );
 
-    const cuotasPorPrestamo = await precargarCuotasPorPrestamos(
-      conn,
-      pagosInsert.map((p) => p.prestamo_id)
-    );
-    const cuotasDirty = new Map();
+    // Modelo flexible: saldo = total − sum(pagos); sin tocar calendario
     const pagosAcumuladoPorPrestamo = new Map();
-
     for (const pg of pagosInsert) {
       pagosAcumuladoPorPrestamo.set(
         pg.prestamo_id,
@@ -1099,39 +969,7 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       );
     }
 
-    for (const pg of pagosInsert) {
-      const cuotas = cuotasPorPrestamo.get(pg.prestamo_id) || [];
-      aplicarMontoACuotasInMemoria(cuotas, pg.monto_pagado);
-      cuotasDirty.set(pg.prestamo_id, cuotas);
-    }
-
-    for (const p of pendientesPago) {
-      const cuotas = cuotasDirty.get(p.prestamo_id);
-      if (!cuotas) continue;
-      const sumPagos = pagosAcumuladoPorPrestamo.get(p.prestamo_id) || 0;
-      const tol = calcularToleranciaReconciliacionCuotas(p.monto_total_pagar, cuotas);
-      reconciliarCuotasConPagosInMemoria(cuotas, sumPagos, tol);
-    }
-
-    const cuotaUpdates = [];
-    for (const cuotas of cuotasDirty.values()) {
-      for (const c of cuotas) {
-        cuotaUpdates.push({ id: c.id, monto_pagado: c.monto_pagado, estado: c.estado });
-      }
-    }
-    if (cuotaUpdates.length) {
-      await updateManyById(conn, {
-        table: 'Cuotas_Calendario',
-        idCol: 'id',
-        fields: ['monto_pagado', 'estado'],
-        rows: cuotaUpdates,
-        chunkSize: 150,
-        extraSet: 'is_synced = 1',
-      });
-    }
-
     const prestamosUpdate = [];
-    const liquidados = [];
     for (const p of pendientesPago) {
       const sumPagos = pagosAcumuladoPorPrestamo.get(p.prestamo_id) || Number(p.monto_pagado_historico || 0);
       if (sumPagos <= 0.01) continue;
@@ -1143,7 +981,6 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         saldo_pendiente: estado === 'Pagado' ? 0 : nuevoSaldo,
         estado,
       });
-      if (estado === 'Pagado') liquidados.push(p.prestamo_id);
     }
 
     if (prestamosUpdate.length) {
@@ -1156,17 +993,11 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
         extraSet: 'is_synced = 1',
       });
     }
-
-    if (liquidados.length) {
-      for (const prestamoId of liquidados) {
-        await sincronizarCuotasTrasCierrePagado(conn, prestamoId);
-      }
-    }
   }
 
   const verificarIds = pendientesPago.map((p) => p.prestamo_id);
   for (const pid of verificarIds) {
-    await cuadrarPrestamoDesdeCalendario(conn, pid);
+    await cuadrarPrestamoDesdePagos(conn, pid);
   }
   await verificarCuadrePrestamosBulk(conn, verificarIds);
 
@@ -1272,18 +1103,7 @@ async function importarUnaFila(conn, fila, ctx) {
     ]
   );
 
-  const agendaCuotas = agenda;
-  for (let i = 0; i < agendaCuotas.length; i += 1) {
-    const c = agendaCuotas[i];
-    ctx.cuotasBuffer.push({
-      id: uuidv4(),
-      prestamo_id: prestamoId,
-      fecha_programada: c.fecha_programada,
-      monto_programado: c.monto_programado,
-      monto_pagado: 0,
-      estado: 'Programada',
-    });
-  }
+  // Modelo flexible: no se genera Cuotas_Calendario.
 
   const rutaId = ctx.rutaCache.get(fila.cobrador_id);
   let orden =

@@ -1,5 +1,4 @@
 const { v4: uuidv4 } = require('uuid');
-const { generarAgendaDeCobro } = require('./finanzasNube');
 
 function parseDiasCobro(raw) {
   if (Array.isArray(raw)) return raw.filter(Boolean);
@@ -14,22 +13,10 @@ function parseDiasCobro(raw) {
   return ['LUNES'];
 }
 
-async function contarSemanasRestantes(conn, prestamoId, cuotaSemanal) {
-  const [pend] = await conn.execute(
-    `SELECT COUNT(*) AS n, COALESCE(SUM(monto_programado - monto_pagado), 0) AS saldo_prog
-     FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL
-       AND estado IN ('Programada', 'Parcial')`,
-    [prestamoId]
-  );
-  const n = Number(pend[0]?.n || 0);
-  if (n > 0) return Math.max(1, n);
-  if (cuotaSemanal > 0) return 1;
-  return 1;
-}
-
 /**
- * Prórroga con interés congelado: extiende calendario sin cambiar cuotas ni sumar interés.
+ * Prórroga con interés congelado (modelo flexible):
+ * solo registra historial y alarga plazo_semanas.
+ * No genera cuotas de calendario.
  */
 async function aplicarProrrogaEnNube(conn, opts) {
   const {
@@ -61,22 +48,13 @@ async function aplicarProrrogaEnNube(conn, opts) {
   const dias = parseDiasCobro(prestamo.dias_de_cobro);
   const frecuencia = dias.length || 1;
   const cuotaSemanalActual = Number(prestamo.cuota_semanal_base) || 0;
+  const cuotaPorDia =
+    cuotaSemanalActual > 0
+      ? Number((cuotaSemanalActual / frecuencia).toFixed(2))
+      : 0;
 
-  const [cuotaRow] = await conn.execute(
-    `SELECT monto_programado FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL AND estado IN ('Programada', 'Parcial')
-     ORDER BY fecha_programada ASC LIMIT 1`,
-    [prestamoId]
-  );
-  let cuotaPorDia = Number(cuotaRow[0]?.monto_programado) || 0;
-  if (cuotaPorDia <= 0 && cuotaSemanalActual > 0) {
-    cuotaPorDia = Number((cuotaSemanalActual / frecuencia).toFixed(2));
-  }
-  if (cuotaPorDia <= 0) {
-    throw new Error('No se pudo determinar el monto de la cuota actual.');
-  }
-
-  const semanasRestantes = await contarSemanasRestantes(conn, prestamoId, cuotaSemanalActual);
+  const plazoActual = Number(prestamo.plazo_semanas) || 0;
+  const semanasRestantes = Math.max(1, Math.ceil(saldo / (cuotaSemanalActual || saldo || 1)));
   const plazoRestante = semanasRestantes + extra;
 
   const prorrogaId = uuidv4();
@@ -99,35 +77,6 @@ async function aplicarProrrogaEnNube(conn, opts) {
     [extra, prestamoId]
   );
 
-  const [ultima] = await conn.execute(
-    `SELECT fecha_programada FROM Cuotas_Calendario
-     WHERE prestamo_id = ? AND deleted_at IS NULL
-     ORDER BY fecha_programada DESC LIMIT 1`,
-    [prestamoId]
-  );
-  const ultimaFecha = ultima[0]?.fecha_programada;
-  const inicioExtra = ultimaFecha
-    ? String(ultimaFecha).slice(0, 10)
-    : String(prestamo.fecha_desembolso).slice(0, 10);
-
-  const agendaExtra = generarAgendaDeCobro(inicioExtra, extra, dias, cuotaPorDia);
-  const [existentes] = await conn.execute(
-    `SELECT fecha_programada FROM Cuotas_Calendario WHERE prestamo_id = ? AND deleted_at IS NULL`,
-    [prestamoId]
-  );
-  const fechasSet = new Set(existentes.map((r) => String(r.fecha_programada).slice(0, 10)));
-
-  for (const c of agendaExtra) {
-    const f = String(c.fecha_programada).slice(0, 10);
-    if (fechasSet.has(f)) continue;
-    fechasSet.add(f);
-    await conn.execute(
-      `INSERT INTO Cuotas_Calendario (id, prestamo_id, fecha_programada, monto_programado, monto_pagado, estado, is_synced)
-       VALUES (?, ?, ?, ?, 0, 'Programada', 1)`,
-      [uuidv4(), prestamoId, f, c.monto_programado]
-    );
-  }
-
   return {
     prorrogaId,
     nuevaCuotaSemanal: cuotaSemanalActual,
@@ -137,9 +86,15 @@ async function aplicarProrrogaEnNube(conn, opts) {
     semanasExtra: extra,
     saldoPendiente: saldo,
     cuotaSinCambio: true,
-    visitasAgregadas: agendaExtra.length,
+    visitasAgregadas: 0,
+    plazo_semanas_nuevo: plazoActual + extra,
     operador_id: operadorId,
   };
+}
+
+async function contarSemanasRestantes(_conn, _prestamoId, cuotaSemanal) {
+  if (cuotaSemanal > 0) return 1;
+  return 1;
 }
 
 module.exports = { aplicarProrrogaEnNube, parseDiasCobro, contarSemanasRestantes };

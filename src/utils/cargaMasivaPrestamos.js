@@ -1,10 +1,11 @@
 const { v4: uuidv4 } = require('uuid');
-const { nombreCompleto } = require('./cliente');
+const { nombreCompleto, splitNombreCompleto } = require('./cliente');
 const {
   normalizarCedula,
   validarCedula,
   codigoSinDocumento,
 } = require('./cedulaNic');
+const { aplicarProrrogaEnNube } = require('./prorrogasNube');
 
 function parseDocumentoTipo(raw) {
   const t = String(raw || '')
@@ -134,6 +135,78 @@ function esFilaEjemplo(raw) {
   return email === 'ejemplo@borrar.com';
 }
 
+/**
+ * Semanas de producto según tasa de paquete (10%→4, 15%→6, 20%→8…).
+ * tasaMensual en decimal (0.15) o ya parseada.
+ */
+function plazoBasePorTasa(tasaMensual) {
+  const t = Number(tasaMensual);
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const pct = t > 1 ? t : t * 100;
+  return Math.max(1, Math.round((pct / 10) * 4));
+}
+
+/**
+ * - Si viene semanas_prorroga: plazo_semanas = producto; prórroga aparte; tasa ya es mensual.
+ * - Si no: plazo del archivo = total; se parten semanas justas del paquete y el resto a prórroga;
+ *   tasa del archivo = % del producto sobre capital → se convierte a tasa_mensual del motor.
+ */
+function resolverPlazoYProrroga({
+  plazoRaw,
+  prorrogaRaw,
+  tasaMensualParsed,
+}) {
+  const ideal = plazoBasePorTasa(tasaMensualParsed);
+  const plazoArch = plazoRaw != null ? Math.floor(plazoRaw) : null;
+  const prorrogaArch =
+    prorrogaRaw != null && Number.isFinite(prorrogaRaw)
+      ? Math.max(0, Math.floor(prorrogaRaw))
+      : null;
+
+  // Plantilla ya con columnas separadas
+  if (prorrogaArch != null && plazoArch != null && plazoArch >= 1) {
+    return {
+      plazo_semanas: plazoArch,
+      semanas_prorroga: prorrogaArch,
+      tasa_mensual: tasaMensualParsed,
+      plazo_base_ideal: ideal,
+    };
+  }
+
+  let plazo_semanas;
+  let semanas_prorroga = 0;
+
+  if (plazoArch != null && plazoArch >= 1 && ideal != null) {
+    if (plazoArch > ideal) {
+      plazo_semanas = ideal;
+      semanas_prorroga = plazoArch - ideal;
+    } else {
+      plazo_semanas = plazoArch;
+      semanas_prorroga = 0;
+    }
+  } else if (plazoArch != null && plazoArch >= 1) {
+    plazo_semanas = plazoArch;
+  } else if (ideal != null) {
+    plazo_semanas = ideal;
+  } else {
+    plazo_semanas = null;
+  }
+
+  // Auto: tasa archivo = interés total del paquete / capital
+  let tasa_mensual = tasaMensualParsed;
+  if (plazo_semanas && plazo_semanas > 0 && tasaMensualParsed != null) {
+    const tasaPaquete = tasaMensualParsed > 1 ? tasaMensualParsed / 100 : tasaMensualParsed;
+    tasa_mensual = Number(((tasaPaquete * 4) / plazo_semanas).toFixed(6));
+  }
+
+  return {
+    plazo_semanas,
+    semanas_prorroga,
+    tasa_mensual,
+    plazo_base_ideal: ideal,
+  };
+}
+
 /** Normaliza fila Excel/CSV (objeto clave-valor) */
 function normalizarFila(raw, indice) {
   if (esFilaEjemplo(raw)) return { _fila: indice + 1, _omitir: true };
@@ -155,10 +228,21 @@ function normalizarFila(raw, indice) {
 
   let primer_nombre = txt(src.primer_nombre);
   let primer_apellido = txt(src.primer_apellido);
-  const segundo_nombre = txt(src.segundo_nombre);
-  const segundo_apellido = txt(src.segundo_apellido);
+  let segundo_nombre = txt(src.segundo_nombre);
+  let segundo_apellido = txt(src.segundo_apellido);
   let nombre_completo = txt(src.nombre_completo || src.nombre);
 
+  const partesIncompletas = !primer_nombre || !primer_apellido;
+  if (nombre_completo && partesIncompletas) {
+    const sp = splitNombreCompleto(nombre_completo);
+    primer_nombre = primer_nombre || sp.primer_nombre;
+    segundo_nombre = segundo_nombre || sp.segundo_nombre;
+    primer_apellido = primer_apellido || sp.primer_apellido;
+    segundo_apellido = segundo_apellido || sp.segundo_apellido;
+    if (!nombre_completo || partesIncompletas) {
+      nombre_completo = sp.nombre_completo || nombre_completo;
+    }
+  }
   if (!nombre_completo && (primer_nombre || primer_apellido)) {
     nombre_completo = nombreCompleto({
       primer_nombre,
@@ -167,15 +251,18 @@ function normalizarFila(raw, indice) {
       segundo_apellido,
     });
   }
-  if (nombre_completo && !primer_nombre) {
-    const partes = nombre_completo.split(/\s+/);
-    primer_nombre = partes[0] || null;
-    primer_apellido = partes.length > 1 ? partes[partes.length - 1] : null;
-  }
 
   const monto = num(src.monto_desembolsado ?? src.monto ?? src.capital);
-  const plazo = num(src.plazo_semanas ?? src.plazo);
-  const tasaMensual = parseTasaMensualInput(src.tasa_mensual ?? src.tasa ?? '10');
+  const plazoRaw = num(src.plazo_semanas ?? src.plazo);
+  const prorrogaRaw = num(
+    src.semanas_prorroga ?? src.semanas_de_prorroga ?? src.prorroga_semanas ?? src.prorroga
+  );
+  const tasaMensualParsed = parseTasaMensualInput(src.tasa_mensual ?? src.tasa ?? '10');
+  const plazoRes = resolverPlazoYProrroga({
+    plazoRaw,
+    prorrogaRaw,
+    tasaMensualParsed,
+  });
   const freq = resolverFrecuenciaCobro({
     tipo_frecuencia: src.tipo_frecuencia ?? src.periodicidad ?? src.tipo_cobro,
     dias_cobro: src.dias_cobro ?? src.dias_de_cobro ?? src.dias,
@@ -189,6 +276,9 @@ function normalizarFila(raw, indice) {
     src.fecha_ultimo_abono ?? src.fecha_ultimo_pago ?? src.ultimo_abono
   );
   const semanas_pagadas = Math.max(0, Math.floor(num(src.semanas_pagadas ?? src.semanas_pagada) || 0));
+  const deuda_anterior = num(
+    src.deuda_anterior ?? src.saldo_anterior ?? src.deuda_arrastrada ?? src.saldo_vencido_anterior
+  );
 
   return {
     _fila: indice + 1,
@@ -209,8 +299,9 @@ function normalizarFila(raw, indice) {
     cobrador_email,
     cobrador_id,
     monto_desembolsado: monto,
-    plazo_semanas: plazo != null ? Math.floor(plazo) : null,
-    tasa_mensual: tasaMensual,
+    plazo_semanas: plazoRes.plazo_semanas,
+    semanas_prorroga: plazoRes.semanas_prorroga,
+    tasa_mensual: plazoRes.tasa_mensual,
     dias_de_cobro: dias,
     tipo_frecuencia: freq.tipo,
     periodicidad: freq.periodicidad,
@@ -220,6 +311,7 @@ function normalizarFila(raw, indice) {
     monto_pagado_historico,
     fecha_ultimo_abono,
     semanas_pagadas,
+    deuda_anterior,
     orden_visita: num(src.orden_visita ?? src.orden_ruta),
   };
 }
@@ -283,6 +375,47 @@ function resolverImportacionFinanciera(fila) {
     fila.tasa_mensual,
     opts
   );
+  const totalProducto = fin.montoTotalPagar;
+
+  /**
+   * Deuda arrastrada (p. ej. saldo vencido de crédito anterior + préstamo nuevo):
+   * - columna deuda_anterior / saldo_anterior, o
+   * - si saldo_pendiente > total del producto (caso Luis y similares).
+   */
+  const deudaCol = num(
+    fila.deuda_anterior ?? fila.saldo_anterior ?? fila.deuda_arrastrada ?? fila.saldo_vencido_anterior
+  );
+  let deudaArrastrada = deudaCol != null && deudaCol > 0 ? Number(deudaCol) : 0;
+
+  const tieneSaldoPre = fila.saldo_pendiente != null && fila.saldo_pendiente >= 0;
+  const tienePagadoPre =
+    fila.monto_pagado_historico != null &&
+    fila.monto_pagado_historico !== '' &&
+    Number(fila.monto_pagado_historico) >= 0;
+  const saldoRaw = tieneSaldoPre ? Number(fila.saldo_pendiente) : null;
+  const pagadoRaw = tienePagadoPre ? Number(fila.monto_pagado_historico) : null;
+
+  if (deudaArrastrada <= 0 && tieneSaldoPre && saldoRaw > totalProducto + 0.02) {
+    // Obligación real ≥ saldo; si hay pagado declarado, total = saldo + pagado
+    if (tienePagadoPre && pagadoRaw > 0.01) {
+      const totalImplicito = Number((saldoRaw + pagadoRaw).toFixed(2));
+      deudaArrastrada = Number(Math.max(0, totalImplicito - totalProducto).toFixed(2));
+    } else {
+      deudaArrastrada = Number((saldoRaw - totalProducto).toFixed(2));
+    }
+  }
+
+  if (deudaArrastrada > 0.01) {
+    fin.montoTotalPagar = Number((totalProducto + deudaArrastrada).toFixed(2));
+    fin.deuda_arrastrada = deudaArrastrada;
+    fin.interesTotal = Number((fin.montoTotalPagar - fila.monto_desembolsado).toFixed(2));
+    if (fila.plazo_semanas > 0) {
+      fin.cuotaSemanalBase = Number((fin.montoTotalPagar / fila.plazo_semanas).toFixed(2));
+      const freq = fin.frecuenciaSemanal || (fila.dias_de_cobro || []).length || 1;
+      fin.cuotaPorDiaDeCobro = Number((fin.cuotaSemanalBase / freq).toFixed(2));
+    }
+  }
+
   let agenda = generarAgendaDeCobro(
     fila.fecha_desembolso,
     fila.plazo_semanas,
@@ -290,7 +423,7 @@ function resolverImportacionFinanciera(fila) {
     fin.cuotaPorDiaDeCobro,
     opts
   );
-  if (fin.tipo_frecuencia === TIPO_DIAS_MES || (fila.periodicidad === TIPO_DIAS_MES)) {
+  if (fin.tipo_frecuencia === TIPO_DIAS_MES || fila.periodicidad === TIPO_DIAS_MES) {
     agenda = repartirMontoEnAgenda(agenda, fin.montoTotalPagar);
     if (agenda.length) {
       fin.cuotaPorDiaDeCobro = Number(agenda[0].monto_programado || fin.cuotaPorDiaDeCobro);
@@ -310,14 +443,14 @@ function resolverImportacionFinanciera(fila) {
   let saldo;
   let monto_pagado_historico;
 
-  const tieneSaldo = fila.saldo_pendiente != null && fila.saldo_pendiente >= 0;
-  const tienePagado = fila.monto_pagado_historico != null && fila.monto_pagado_historico >= 0;
+  const tieneSaldo = tieneSaldoPre;
+  const tienePagado = tienePagadoPre;
 
   if (tieneSaldo) {
-    saldo = Number(Math.min(Math.max(0, Number(fila.saldo_pendiente)), total).toFixed(2));
+    saldo = Number(Math.min(Math.max(0, saldoRaw), total).toFixed(2));
     monto_pagado_historico = Number((total - saldo).toFixed(2));
   } else if (tienePagado) {
-    monto_pagado_historico = Number(Math.min(Number(fila.monto_pagado_historico), total).toFixed(2));
+    monto_pagado_historico = Number(Math.min(Number(pagadoRaw), total).toFixed(2));
     saldo = Math.max(0, Number((total - monto_pagado_historico).toFixed(2)));
   } else if (fila.semanas_pagadas > 0) {
     const cuotasVirtuales = Math.min(agenda.length, fila.semanas_pagadas * cuotasPorSemana);
@@ -337,6 +470,8 @@ function resolverImportacionFinanciera(fila) {
     saldo_pendiente: saldo,
     monto_pagado_historico,
     fecha_ultimo_abono,
+    deuda_arrastrada: fin.deuda_arrastrada || 0,
+    total_producto: totalProducto,
   };
 }
 
@@ -386,7 +521,47 @@ function calcularPreview(fila) {
     fecha_ultimo_abono: resolved.fecha_ultimo_abono,
     cuotas_agenda: agenda.length,
     creara_pago_historico: monto_pagado_historico > 0.01,
+    semanas_prorroga: fila.semanas_prorroga || 0,
+    plazo_total: (fila.plazo_semanas || 0) + (fila.semanas_prorroga || 0),
+    deuda_arrastrada: resolved.deuda_arrastrada || 0,
+    total_producto: resolved.total_producto,
   };
+}
+
+async function aplicarProrrogaSiCorresponde(conn, prestamoId, semanasExtra, operadorId, comentario) {
+  const extra = Math.floor(Number(semanasExtra) || 0);
+  if (!prestamoId || extra < 1) return null;
+  try {
+    return await aplicarProrrogaEnNube(conn, {
+      prestamo_id: prestamoId,
+      semanas_extra: extra,
+      comentario: comentario || 'Carga inicial (semanas de prórroga del archivo)',
+      operador_id: operadorId || null,
+    });
+  } catch (e) {
+    // Sin saldo no aplica la ruta operativa; igual alargamos plazo + historial.
+    if (!/saldo/i.test(String(e.message || ''))) throw e;
+    const prorrogaId = uuidv4();
+    const fecha = new Date().toISOString();
+    const [rows] = await conn.execute(
+      `SELECT saldo_pendiente, cuota_semanal_base FROM Prestamos WHERE id = ? LIMIT 1`,
+      [prestamoId]
+    );
+    const saldo = Number(rows[0]?.saldo_pendiente || 0);
+    const cuota = Number(rows[0]?.cuota_semanal_base || 0);
+    await conn.execute(
+      `INSERT INTO Historial_Prorrogas (
+        id, prestamo_id, semanas_extra, saldo_anterior, nueva_cuota_semanal,
+        fecha_prorroga, comentario, is_synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+      [prorrogaId, prestamoId, extra, saldo, cuota, fecha, comentario || 'Carga inicial (sin saldo / prórroga)']
+    );
+    await conn.execute(
+      `UPDATE Prestamos SET plazo_semanas = plazo_semanas + ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
+      [extra, prestamoId]
+    );
+    return { prorrogaId, semanasExtra: extra, saldoPendiente: saldo };
+  }
 }
 
 async function cuadrarPrestamoDesdePagos(conn, prestamoId) {
@@ -776,6 +951,8 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
       dias_de_cobro: diasJson,
       periodicidad: fila.periodicidad || fin.periodicidad || 'SEMANAL',
       fecha_desembolso: fila.fecha_desembolso,
+      semanas_prorroga: fila.semanas_prorroga || 0,
+      cobrador_id: fila.cobrador_id,
     });
 
     // Modelo flexible: no se genera Cuotas_Calendario.
@@ -901,6 +1078,19 @@ async function importarFilasEnLote(conn, preparadas, mapa) {
     prestamosInsert,
     80
   );
+
+  // Prórrogas de carga: alargan plazo sin interés extra
+  for (const p of prestamosInsert) {
+    if ((p.semanas_prorroga || 0) >= 1) {
+      await aplicarProrrogaSiCorresponde(
+        conn,
+        p.id,
+        p.semanas_prorroga,
+        p.cobrador_id,
+        'Carga inicial (semanas de prórroga del archivo)'
+      );
+    }
+  }
 
   // Modelo flexible: no se genera calendario de cuotas (ruta usa dias_de_cobro).
 
@@ -1103,6 +1293,16 @@ async function importarUnaFila(conn, fila, ctx) {
     ]
   );
 
+  if ((fila.semanas_prorroga || 0) >= 1) {
+    await aplicarProrrogaSiCorresponde(
+      conn,
+      prestamoId,
+      fila.semanas_prorroga,
+      fila.cobrador_id,
+      'Carga inicial (semanas de prórroga del archivo)'
+    );
+  }
+
   // Modelo flexible: no se genera Cuotas_Calendario.
 
   const rutaId = ctx.rutaCache.get(fila.cobrador_id);
@@ -1239,6 +1439,8 @@ module.exports = {
   importarFilas,
   resolverImportacionFinanciera,
   calcularPreview,
+  resolverPlazoYProrroga,
+  plazoBasePorTasa,
   PLANTILLA_COLUMNAS: [
     'codigo_cliente',
     'cedula',
@@ -1254,6 +1456,7 @@ module.exports = {
     'cobrador_email',
     'monto_desembolsado',
     'plazo_semanas',
+    'semanas_prorroga',
     'tasa_mensual',
     'tipo_frecuencia',
     'dias_cobro',

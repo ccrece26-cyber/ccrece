@@ -8,11 +8,9 @@ const {
   diaCobroHoy,
   montoVisitaHoy,
   debeIncluirEnAgenda,
-  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('../utils/diasCobro');
-const { cargarSetFeriados, listarFeriadosActivos } = require('../utils/feriados');
 const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } = require('../utils/fiadoresNube');
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
@@ -121,7 +119,6 @@ async function rutaDiaria(req, res) {
 
     const hoyDia = diaCobroHoy();
     const agenda = [];
-    const feriadosSet = await cargarSetFeriados();
 
     let pagos_hoy = [];
     let gestiones_hoy = [];
@@ -178,6 +175,7 @@ async function rutaDiaria(req, res) {
         ? Math.max(0, Number(cuotaPend.monto_programado) - Number(cuotaPend.monto_pagado || 0))
         : montoVisitaHoy(p.cuota_semanal_base, p.dias_de_cobro);
       const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
+      const tocaHoy = extra.toca_hoy != null ? !!extra.toca_hoy : debeIncluirEnAgenda(hoy, p);
       agenda.push({
         cuota_id: cuotaPend?.id || `visita-${p.id}`,
         prestamo_id: p.id,
@@ -199,6 +197,8 @@ async function rutaDiaria(req, res) {
         monto_total_pagar: p.monto_total_pagar,
         estado_prestamo: p.estado,
         dia_cobro: hoyDia,
+        toca_hoy: tocaHoy,
+        fuera_de_dia: !tocaHoy,
         tipo_visita: extra.tipo_visita || 'activo',
         estado_visita: extra.estado_visita
           ?? (pagoPorPrestamo.has(p.id)
@@ -209,10 +209,11 @@ async function rutaDiaria(req, res) {
               ? 'no_pago'
               : 'pendiente'),
         etiqueta_visita:
-          extra.etiqueta_visita
-          ?? (pagoPorPrestamo.has(p.id) && Number(pagoPorPrestamo.get(p.id).registrado_por_admin) === 1
+          (pagoPorPrestamo.has(p.id) && Number(pagoPorPrestamo.get(p.id).registrado_por_admin) === 1
             ? 'Cobrado por administrador'
-            : null),
+            : null)
+          ?? extra.etiqueta_visita
+          ?? null,
         pago_hoy_id: extra.pago_hoy_id ?? pagoPorPrestamo.get(p.id)?.id ?? null,
       });
     };
@@ -220,33 +221,19 @@ async function rutaDiaria(req, res) {
     for (const c of clientes) {
       const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
       if (p) {
+        const tocaHoy = debeIncluirEnAgenda(hoy, p);
         const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
-        const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
-          cuotasPrestamo,
-          p.id,
-          hoy,
-          esCuotaDiaDesembolso,
-          p
-        );
-        if (
-          debeIncluirEnAgenda(hoy, p, {
-            feriadosSet,
-            tieneCuotaHoy,
-            tieneCuotaVencida: cuotasPrestamo.some((cc) => {
-              const f = String(cc.fecha_programada || '').slice(0, 10);
-              return f && f < hoy && ['Programada', 'Parcial'].includes(cc.estado);
-            }),
-          })
-        ) {
-          const cuotaPend =
-            cuotasPrestamo.find(
-              (cc) =>
-                String(cc.fecha_programada || '').slice(0, 10) === hoy &&
-                !esCuotaDiaDesembolso(cc, p)
-            ) ||
-            cuotasPrestamo.find((cc) => !esCuotaDiaDesembolso(cc, p));
-          pushAgendaItem(c, p, cuotaPend);
-        }
+        const cuotaPend =
+          cuotasPrestamo.find(
+            (cc) =>
+              String(cc.fecha_programada || '').slice(0, 10) === hoy &&
+              !esCuotaDiaDesembolso(cc, p)
+          ) ||
+          cuotasPrestamo.find((cc) => !esCuotaDiaDesembolso(cc, p));
+        pushAgendaItem(c, p, cuotaPend, {
+          etiqueta_visita: tocaHoy ? null : 'Fuera de día',
+          toca_hoy: tocaHoy,
+        });
       }
 
       const pagosCliente = pagos_hoy.filter((pg) => pg.cliente_id === c.id);
@@ -273,6 +260,7 @@ async function rutaDiaria(req, res) {
     }
 
     agenda.sort((a, b) => {
+      if (!!a.toca_hoy !== !!b.toca_hoy) return a.toca_hoy ? -1 : 1;
       const o = (a.orden_visita ?? 999) - (b.orden_visita ?? 999);
       if (o !== 0) return o;
       if (a.tipo_visita === 'liquidado' && b.tipo_visita === 'activo') return -1;
@@ -325,7 +313,6 @@ async function rutaDiaria(req, res) {
         pagos_hoy,
         gestiones_hoy,
         pagos_anulados_hoy,
-        feriados: await listarFeriadosActivos(),
       },
     });
   } catch (e) {

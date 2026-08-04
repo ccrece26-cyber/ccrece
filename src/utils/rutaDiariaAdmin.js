@@ -6,11 +6,9 @@ const {
   diaCobroHoy,
   montoVisitaHoy,
   debeIncluirEnAgenda,
-  tieneCuotaProgramadaEnFecha,
   esCuotaDiaDesembolso,
   fechaCalendarioISO,
 } = require('./diasCobro');
-const { cargarSetFeriados } = require('./feriados');
 const { rangoDiaLocal } = require('../utils/fechasSql');
 const { capMontoAlSaldo } = require('./cobroMontos');
 const { seleccionarCuotaAgenda, montoCobroDelDia } = require('./cuotasCalendario');
@@ -182,7 +180,6 @@ async function loadAgendaAdminHoy(opciones = {}) {
       }
     }
 
-    const feriadosSet = await cargarSetFeriados();
     const pagoPorPrestamo = new Map(pagos_hoy.map((pg) => [pg.prestamo_id, pg]));
     const gestionPorPrestamo = new Map(gestiones_hoy.map((g) => [g.prestamo_id, g]));
     const prestamosEnAgenda = new Set();
@@ -199,6 +196,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
       prestamosEnAgenda.add(p.id);
       const montoDiaRaw = montoCobroDelDia(cuotaPend, p, montoVisitaHoy);
       const montoDia = capMontoAlSaldo(montoDiaRaw, p.saldo_pendiente);
+      const tocaHoy = extra.toca_hoy != null ? !!extra.toca_hoy : debeIncluirEnAgenda(hoy, p);
       const ev =
         extra.estado_visita ??
         (pagoPorPrestamo.has(p.id)
@@ -232,11 +230,14 @@ async function loadAgendaAdminHoy(opciones = {}) {
         dia_cobro: hoyDia,
         cobrador_asignado: c.cobrador_asignado || null,
         cobrador_asignado_id: c.cobrador_asignado_id || c.cobrador_id || null,
+        toca_hoy: tocaHoy,
+        fuera_de_dia: !tocaHoy,
         tipo_visita: extra.tipo_visita || 'activo',
         etiqueta_visita:
           extra.etiqueta_visita ||
           etiquetaVisitaDesdePago(pagoPorPrestamo.get(p.id), extra.tipo_visita === 'liquidado') ||
-          (ev === 'cobrado_admin' ? 'Cobrado por administrador' : null),
+          (ev === 'cobrado_admin' ? 'Cobrado por administrador' : null) ||
+          (!tocaHoy && !pagoPorPrestamo.has(p.id) ? 'Fuera de día' : null),
         estado_visita: ev,
         pago_hoy_id: extra.pago_hoy_id ?? pagoPorPrestamo.get(p.id)?.id ?? null,
       });
@@ -246,32 +247,15 @@ async function loadAgendaAdminHoy(opciones = {}) {
       const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
       if (!p) continue;
       const cuotasPrestamo = cuotas.filter((cc) => cc.prestamo_id === p.id);
-      const tieneCuotaHoy = tieneCuotaProgramadaEnFecha(
+      const tocaHoy = debeIncluirEnAgenda(hoy, p);
+      const cuotaPend = seleccionarCuotaAgenda(
         cuotasPrestamo,
-        p.id,
+        p,
         hoy,
         esCuotaDiaDesembolso,
-        p
+        montoVisitaHoy
       );
-      if (
-        debeIncluirEnAgenda(hoy, p, {
-          feriadosSet,
-          tieneCuotaHoy,
-          tieneCuotaVencida: cuotasPrestamo.some((cc) => {
-            const f = String(cc.fecha_programada || '').slice(0, 10);
-            return f && f < hoy && ['Programada', 'Parcial'].includes(cc.estado);
-          }),
-        })
-      ) {
-        const cuotaPend = seleccionarCuotaAgenda(
-          cuotasPrestamo,
-          p,
-          hoy,
-          esCuotaDiaDesembolso,
-          montoVisitaHoy
-        );
-        pushAgendaItem(c, p, cuotaPend);
-      }
+      pushAgendaItem(c, p, cuotaPend, { toca_hoy: tocaHoy });
     }
 
     for (const pg of pagos_hoy) {

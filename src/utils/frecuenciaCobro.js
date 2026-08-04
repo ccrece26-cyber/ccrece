@@ -49,18 +49,25 @@ const ordenarDiasMes = (dias) =>
 const parseDiasMesRaw = (raw) => {
   if (raw == null || raw === '') return [];
   if (Array.isArray(raw)) return ordenarDiasMes(raw);
-  const nums = String(raw).match(/\b([1-9]|[12]\d|3[01])\b/g);
+  // Soporta "15 y 30", "15y 30", "10,25", "05", "20 y 05 de cada mes"
+  const s = String(raw).replace(/(\d)([a-zA-ZáéíóúÁÉÍÓÚñÑ])/g, '$1 $2');
+  const nums = s.match(/\b0*([1-9]|[12]\d|3[01])\b/g);
   if (!nums || !nums.length) return [];
-  return ordenarDiasMes(nums.map(Number));
+  return ordenarDiasMes(nums.map((n) => Number(String(n).replace(/^0+/, '') || n)));
 };
 
 const parecePatronMes = (raw) => {
   const s = String(raw || '');
   if (/\d+\s*y\s*\d+/i.test(s)) return true;
+  if (/\d+y\d+/i.test(s)) return true;
   if (/cada\s*mes/i.test(s)) return true;
   if (/quincen/i.test(s)) return true;
+  if (parseDiasMesRaw(s).length >= 1 && !/[A-Za-zÁÉÍÓÚáéíóú]{3,}/.test(s.replace(/cada|mes|de|y/gi, ''))) {
+    // solo números y conectores
+    return parseDiasMesRaw(s).length > 0;
+  }
   const soloNums = s.replace(/[,;|/\s yYeE]+/g, ',').split(',').filter(Boolean);
-  return soloNums.length > 0 && soloNums.every((p) => esDiaMesNumero(p));
+  return soloNums.length > 0 && soloNums.every((p) => esDiaMesNumero(String(p).replace(/^0+/, '') || p));
 };
 
 const parseDiasCobroSemanal = (valor) => {

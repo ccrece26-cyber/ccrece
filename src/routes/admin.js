@@ -2115,7 +2115,7 @@ async function aplicarProrroga(req, res) {
   }
 }
 
-/** Prórroga y/o perdón de saldo (negociación admin, sin mora automática). */
+/** Prórroga, mora y/o perdón de saldo (negociación admin). */
 async function negociarCredito(req, res) {
   const conn = await getConnection();
   try {
@@ -2123,6 +2123,7 @@ async function negociarCredito(req, res) {
     const resultado = await aplicarNegociacionVencido(conn, {
       prestamo_id: req.body.prestamo_id,
       monto_perdonado: req.body.monto_perdonado,
+      monto_mora: req.body.monto_mora,
       nuevo_saldo: req.body.nuevo_saldo,
       semanas_extra: req.body.semanas_extra,
       comentario: req.body.comentario || '',

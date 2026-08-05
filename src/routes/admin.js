@@ -1720,16 +1720,16 @@ async function getCumplimientoRuta(req, res) {
 
     const cobradores = cobradorId
       ? await query(
-          `SELECT u.id, u.nombre_completo FROM Usuarios u
+          `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
            JOIN Roles r ON u.rol_id = r.id
-           WHERE u.id = ? AND r.nombre = 'COBRADOR' AND u.activo = 1`,
+           WHERE u.id = ? AND r.nombre IN ('COBRADOR', 'ADMIN') AND u.activo = 1`,
           [cobradorId]
         )
       : await query(
-          `SELECT u.id, u.nombre_completo FROM Usuarios u
+          `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
            JOIN Roles r ON u.rol_id = r.id
-           WHERE r.nombre = 'COBRADOR' AND u.activo = 1
-           ORDER BY u.nombre_completo`
+           WHERE r.nombre IN ('COBRADOR', 'ADMIN') AND u.activo = 1
+           ORDER BY CASE WHEN r.nombre = 'ADMIN' THEN 0 ELSE 1 END, u.nombre_completo`
         );
 
     let filas;
@@ -1831,7 +1831,7 @@ function validarFechaCierreAdmin(fechaISO) {
   return { ok: true, fecha: f, hoy };
 }
 
-/** Admin: cerrar caja de un cobrador (hoy o dias anteriores olvidados). */
+/** Admin: cerrar caja de un cobrador o del admin (recaudo propio en modo campo). */
 async function cerrarCierreCajaDia(req, res) {
   try {
     const cobradorId = req.body?.cobrador_id;
@@ -1844,13 +1844,18 @@ async function cerrarCierreCajaDia(req, res) {
     const fecha = val.fecha;
 
     const [cob] = await query(
-      `SELECT u.id, u.nombre_completo FROM Usuarios u
+      `SELECT u.id, u.nombre_completo, r.nombre AS rol
+       FROM Usuarios u
        JOIN Roles r ON u.rol_id = r.id
-       WHERE u.id = ? AND r.nombre = 'COBRADOR'`,
+       WHERE u.id = ? AND u.deleted_at IS NULL AND u.activo = 1
+         AND r.nombre IN ('COBRADOR', 'ADMIN')`,
       [cobradorId]
     );
     if (!cob) {
-      return res.status(404).json({ success: false, message: 'Cobrador no encontrado' });
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado o no puede cerrar caja (solo cobrador/admin).',
+      });
     }
 
     const existente = await query(
@@ -1872,12 +1877,13 @@ async function cerrarCierreCajaDia(req, res) {
     }
 
     const { inicio, fin } = rangoDiaLocal(fecha);
+    // Verdad de caja = pagos con cobrador_id (sin duplicar operador_id del admin)
     const [tot] = await query(
       `SELECT COUNT(id) AS transacciones, COALESCE(SUM(monto_pagado), 0) AS monto_total
        FROM Pagos
-       WHERE deleted_at IS NULL AND (cobrador_id = ? OR operador_id = ?)
+       WHERE deleted_at IS NULL AND cobrador_id = ?
          AND fecha_pago >= ? AND fecha_pago < ?`,
-      [cobradorId, cobradorId, inicio, fin]
+      [cobradorId, inicio, fin]
     );
 
     const montoCalc = Number(tot?.monto_total || 0);
@@ -1899,9 +1905,12 @@ async function cerrarCierreCajaDia(req, res) {
     }
 
     const id = req.body?.id || uuidv4();
+    const esAdminCaja = String(cob.rol || '').toUpperCase() === 'ADMIN';
     const obs =
       req.body?.observaciones ||
-      `Cierre registrado por administrador (${fecha}${fecha === val.hoy ? '' : ', dia anterior'}).`;
+      (esAdminCaja
+        ? `Cierre caja admin / recaudo propio (${fecha}).`
+        : `Cierre registrado por administrador (${fecha}${fecha === val.hoy ? '' : ', dia anterior'}).`);
 
     await query(
       `INSERT INTO Cierre_Caja (id, cobrador_id, fecha_cierre, monto_efectivo, transacciones, observaciones, latitud, longitud, is_synced)
@@ -1919,6 +1928,7 @@ async function cerrarCierreCajaDia(req, res) {
         monto_efectivo: monto,
         transacciones,
         observaciones: obs,
+        rol: cob.rol,
       },
     });
   } catch (e) {

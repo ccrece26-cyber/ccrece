@@ -218,6 +218,7 @@ function armarAgendaDesdeDatos(
 
 async function cargarDatosCobrador(query, cobradorId, fechaISO) {
   const hoy = fechaISO || fechaCalendarioISO();
+  const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
 
   const clientes = await query(
     `SELECT DISTINCT c.*, rc.ruta_id, rc.orden_visita
@@ -249,7 +250,6 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
     prestamos = [...activoPorCliente.values()];
     // Modelo flexible: agenda ya no depende de Cuotas_Calendario.
     cuotas = [];
-    const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
     pagos_hoy = await query(
       `SELECT pg.*, p.cliente_id
        FROM Pagos pg
@@ -280,7 +280,24 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
     }
   }
 
-  return { hoy, clientes, prestamos, cuotas, pagos_hoy, gestiones_hoy };
+  // Pagos de caja del usuario (admin sin ruta, o cobros ajenos a su cartera).
+  const pagosCaja = await query(
+    `SELECT pg.*, p.cliente_id
+     FROM Pagos pg
+     INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+     WHERE pg.deleted_at IS NULL AND pg.cobrador_id = ?
+       AND pg.fecha_pago >= ? AND pg.fecha_pago < ?`,
+    [cobradorId, diaIni, diaFin]
+  );
+  const idsVistos = new Set(pagos_hoy.map((p) => p.id));
+  for (const pg of pagosCaja) {
+    if (!idsVistos.has(pg.id)) {
+      pagos_hoy.push(pg);
+      idsVistos.add(pg.id);
+    }
+  }
+
+  return { hoy, clientes, prestamos, cuotas, pagos_hoy, gestiones_hoy, pagos_caja: pagosCaja };
 }
 
 /**
@@ -293,6 +310,7 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
   }
 
   const ph = cobradorIds.map(() => '?').join(',');
+  const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
 
   const clientes = await query(
     `SELECT DISTINCT c.*, rc.orden_visita, r.cobrador_id AS ruta_cobrador_id
@@ -325,7 +343,6 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
     // Modelo flexible: no cargar Cuotas_Calendario para cumplimiento.
     cuotas = [];
 
-    const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
     pagos_hoy = await query(
       `SELECT pg.*, p.cliente_id
        FROM Pagos pg
@@ -354,6 +371,23 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
     }
   }
 
+  // Incluir cobros de caja de cada usuario aunque el cliente no esté en la ruta de ese usuario (admin).
+  const pagosCajaUsers = await query(
+    `SELECT pg.*, p.cliente_id
+     FROM Pagos pg
+     INNER JOIN Prestamos p ON pg.prestamo_id = p.id
+     WHERE pg.deleted_at IS NULL AND pg.cobrador_id IN (${ph})
+       AND pg.fecha_pago >= ? AND pg.fecha_pago < ?`,
+    [...cobradorIds, diaIni, diaFin]
+  );
+  const idsVistos = new Set(pagos_hoy.map((p) => p.id));
+  for (const pg of pagosCajaUsers) {
+    if (!idsVistos.has(pg.id)) {
+      pagos_hoy.push(pg);
+      idsVistos.add(pg.id);
+    }
+  }
+
   const cierres = await query(
     `SELECT cobrador_id, id, monto_efectivo, transacciones
      FROM Cierre_Caja
@@ -375,11 +409,18 @@ async function buildAgendaCobrador(query, cobradorId, fechaISO) {
     datos.gestiones_hoy,
     cobradorId
   );
+  const pagosCaja = datos.pagos_caja || datos.pagos_hoy.filter((p) => p.cobrador_id === cobradorId);
+  const montoCaja = pagosCaja.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
   return {
     dia_cobro: diaCobroDeFecha(datos.hoy),
     fecha: datos.hoy,
     agenda: armado.agenda,
-    resumen: armado.resumen,
+    resumen: {
+      ...armado.resumen,
+      monto_cobrado: montoCaja,
+      cobros_registrados: pagosCaja.length,
+      cobrado: pagosCaja.length,
+    },
     pagos_hoy: armado.pagos_hoy,
     gestiones_hoy: armado.gestiones_hoy,
   };
@@ -407,14 +448,10 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
     const clientesCob = datos.clientes.filter((c) => c.ruta_cobrador_id === cob.id);
     const clienteIds = new Set(clientesCob.map((c) => c.id));
     const prestamosCob = datos.prestamos.filter((p) => clienteIds.has(p.cliente_id));
+    // Agenda: todos los cobros del día en clientes de la ruta (incluye cobrado por admin).
     const pagosRuta = datos.pagos_hoy.filter((pg) => clienteIds.has(pg.cliente_id));
-    const pagosCob = datos.pagos_hoy.filter(
-      (pg) => pg.cobrador_id === cob.id || pg.operador_id === cob.id
-    );
-    /** Cobros en ruta de este cobrador que él mismo registró (no atribuir cobros ajenos por ruta). */
-    const pagosRutaCobrador = pagosRuta.filter(
-      (pg) => pg.cobrador_id === cob.id || pg.operador_id === cob.id
-    );
+    // Caja: solo pagos con cobrador_id = este usuario (admin cierra su propio recaudo).
+    const pagosCaja = datos.pagos_hoy.filter((pg) => pg.cobrador_id === cob.id);
     const gestMerged = datos.gestiones_hoy.filter((g) => {
       if (g.cobrador_id === cob.id || g.operador_id === cob.id) return true;
       const pr = datos.prestamos.find((p) => p.id === g.prestamo_id);
@@ -426,17 +463,18 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       clientesCob,
       prestamosCob,
       datos.cuotas,
-      pagosRutaCobrador,
+      pagosRuta,
       gestMerged,
       cob.id
     );
 
-    const montoCobradoReal = pagosCob.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
-    const cobrosRegistrados = pagosCob.length;
+    const montoCobradoReal = pagosCaja.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
+    const cobrosRegistrados = pagosCaja.length;
 
     filas.push({
       cobrador_id: cob.id,
       cobrador: cob.nombre_completo,
+      rol: cob.rol || null,
       ...armado.resumen,
       cobrado: cobrosRegistrados,
       monto_cobrado: montoCobradoReal,

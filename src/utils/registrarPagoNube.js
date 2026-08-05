@@ -49,7 +49,8 @@ async function registrarPagoEnNube(conn, opts) {
   if (!prestRows.length) throw new Error('Prestamo no encontrado');
   const prestamo = prestRows[0];
 
-  const cobradorRegistro = (await resolverCobradorAsignado(conn, prestamoId)) || operadorId;
+  // Caja del que cobra (admin en modo campo = su caja, no la del cobrador asignado).
+  const cobradorRegistro = operadorId || (await resolverCobradorAsignado(conn, prestamoId));
   const esLiquidacion = tipo === 'liquidacion';
   let montoEfectivo = Number(montoInput);
 

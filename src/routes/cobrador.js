@@ -1875,9 +1875,9 @@ async function resumenCierreCaja(req, res) {
     const pagos = await query(
       `SELECT COUNT(id) AS transacciones, COALESCE(SUM(monto_pagado), 0) AS monto_total
        FROM Pagos
-       WHERE deleted_at IS NULL AND (cobrador_id = ? OR operador_id = ?)
+       WHERE deleted_at IS NULL AND cobrador_id = ?
          AND fecha_pago >= ? AND fecha_pago < ?`,
-      [cobradorId, cobradorId, inicio, fin]
+      [cobradorId, inicio, fin]
     );
     const cierre = await query(
       `SELECT id, fecha_cierre, monto_efectivo, transacciones

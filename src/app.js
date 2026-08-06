@@ -100,6 +100,7 @@ app.get('/api/admin/campo/mi-ruta', adminCampo.getMiRutaCampo);
 app.post('/api/admin/campo/mi-ruta/clientes', adminCampo.postClienteMiRutaCampo);
 app.delete('/api/admin/campo/mi-ruta/clientes/:clienteId', adminCampo.deleteClienteMiRutaCampo);
 app.put('/api/admin/campo/mi-ruta/optimizar', adminCampo.putOptimizarMiRutaCampo);
+app.get('/api/admin/campo/buscar-clientes', adminCampo.getBuscarClientesCampo);
 app.get('/api/admin/campo/resumen-cobro/:prestamoId', adminCampo.getResumenCobroCampo);
 app.post('/api/admin/campo/pago', adminCampo.postPagoCampo);
 app.post('/api/admin/campo/gestion-no-pago', adminCampo.postGestionNoPagoCampo);

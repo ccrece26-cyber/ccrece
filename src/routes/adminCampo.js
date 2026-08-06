@@ -237,6 +237,124 @@ async function postGestionNoPagoCampo(req, res) {
   }
 }
 
+/**
+ * Busca créditos activos para cobrar fuera del día de cobro (modo campo admin).
+ * alcance=ruta: solo clientes en la ruta campo del admin.
+ * alcance=todos (default): toda la cartera.
+ */
+async function getBuscarClientesCampo(req, res) {
+  try {
+    const adminId = req.query.admin_id || null;
+    const alcance = req.query.alcance === 'ruta' ? 'ruta' : 'todos';
+    const texto = String(req.query.q || '').trim().toLowerCase();
+    const hoy = hoyISO();
+    const { inicio: diaIni, fin: diaFin } = require('../utils/fechasSql').rangoDiaLocal(hoy);
+    const { debeIncluirEnAgenda } = require('../utils/diasCobro');
+
+    if (alcance === 'ruta' && !adminId) {
+      return res.status(400).json({ success: false, message: 'admin_id requerido para alcance=ruta' });
+    }
+
+    let rows;
+    if (alcance === 'ruta') {
+      rows = await query(
+        `SELECT c.id AS cliente_id, c.nombre_completo, c.telefono, c.direccion, c.cedula,
+                c.latitud, c.longitud, COALESCE(rc.orden_visita, 999) AS orden_visita,
+                u.nombre_completo AS cobrador_asignado,
+                p.id AS prestamo_id, p.saldo_pendiente, p.cuota_semanal_base, p.dias_de_cobro,
+                p.monto_total_pagar, p.estado AS estado_prestamo, p.fecha_desembolso,
+                p.plazo_semanas, p.periodicidad
+         FROM Clientes c
+         INNER JOIN Prestamos p ON p.cliente_id = c.id AND p.estado = 'Activo' AND p.deleted_at IS NULL
+         INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
+         INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1 AND r.deleted_at IS NULL
+         LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
+         WHERE c.deleted_at IS NULL
+         ORDER BY c.nombre_completo ASC
+         LIMIT 200`,
+        [adminId]
+      );
+    } else {
+      rows = await query(
+        `SELECT c.id AS cliente_id, c.nombre_completo, c.telefono, c.direccion, c.cedula,
+                c.latitud, c.longitud, 999 AS orden_visita,
+                u.nombre_completo AS cobrador_asignado,
+                p.id AS prestamo_id, p.saldo_pendiente, p.cuota_semanal_base, p.dias_de_cobro,
+                p.monto_total_pagar, p.estado AS estado_prestamo, p.fecha_desembolso,
+                p.plazo_semanas, p.periodicidad
+         FROM Clientes c
+         INNER JOIN Prestamos p ON p.cliente_id = c.id AND p.estado = 'Activo' AND p.deleted_at IS NULL
+         LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
+         WHERE c.deleted_at IS NULL
+         ORDER BY c.nombre_completo ASC
+         LIMIT 400`
+      );
+    }
+
+    const cobradosHoy = await query(
+      `SELECT DISTINCT prestamo_id FROM Pagos
+       WHERE deleted_at IS NULL AND fecha_pago >= ? AND fecha_pago < ?`,
+      [diaIni, diaFin]
+    );
+    const yaCobrados = new Set(cobradosHoy.map((r) => r.prestamo_id));
+
+    const fuera = [];
+    for (const row of rows || []) {
+      if (yaCobrados.has(row.prestamo_id)) continue;
+      const tocaHoy = debeIncluirEnAgenda(hoy, {
+        fecha_desembolso: row.fecha_desembolso,
+        dias_de_cobro: row.dias_de_cobro,
+        periodicidad: row.periodicidad,
+      });
+      if (tocaHoy) continue;
+      if (texto) {
+        const hay = [row.nombre_completo, row.cedula, row.cliente_id, row.direccion, row.telefono]
+          .map((x) => String(x || '').toLowerCase())
+          .some((s) => s.includes(texto));
+        if (!hay) continue;
+      }
+      const montoRaw = montoVisitaHoy(row.cuota_semanal_base, row.dias_de_cobro, {
+        periodicidad: row.periodicidad,
+      });
+      fuera.push({
+        cliente_id: row.cliente_id,
+        codigo_cliente: row.cliente_id,
+        nombre_completo: row.nombre_completo,
+        telefono: row.telefono,
+        direccion: row.direccion,
+        cedula: row.cedula,
+        latitud: row.latitud != null ? Number(row.latitud) : null,
+        longitud: row.longitud != null ? Number(row.longitud) : null,
+        orden_visita: row.orden_visita,
+        cobrador_asignado: row.cobrador_asignado || null,
+        prestamo_id: row.prestamo_id,
+        estado_prestamo: row.estado_prestamo,
+        saldo_pendiente: Number(row.saldo_pendiente),
+        cuota_semanal_base: row.cuota_semanal_base,
+        dias_de_cobro: row.dias_de_cobro,
+        monto_total_pagar: row.monto_total_pagar,
+        fecha_desembolso: row.fecha_desembolso,
+        plazo_semanas: row.plazo_semanas,
+        cuota_id: `visita-${row.prestamo_id}`,
+        monto_programado: capMontoAlSaldo(montoRaw, row.saldo_pendiente),
+        monto_sugerido: capMontoAlSaldo(montoRaw, row.saldo_pendiente),
+        monto_pagado: 0,
+        fecha_programada: hoy,
+        estado_cuota: 'Programada',
+        tipo_visita: 'activo',
+        estado_visita: 'pendiente',
+        etiqueta_visita: 'Fuera de día',
+        fuera_de_dia: true,
+      });
+      if (fuera.length >= 50) break;
+    }
+
+    return res.json({ success: true, data: { clientes: fuera, total: fuera.length } });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 module.exports = {
   getAgendaCampo,
   getMiRutaCampo,
@@ -246,4 +364,5 @@ module.exports = {
   getResumenCobroCampo,
   postPagoCampo,
   postGestionNoPagoCampo,
+  getBuscarClientesCampo,
 };

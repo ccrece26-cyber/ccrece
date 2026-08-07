@@ -1333,11 +1333,76 @@ async function renovacion(req, res) {
     const operadorId = operador?.id || nuevo_prestamo?.cobrador_registro_id || null;
     const operadorNombre = operador?.nombre || null;
     await conn.beginTransaction();
-    await conn.execute(
-      `UPDATE Prestamos SET estado = 'Cerrado por Renovación', saldo_pendiente = 0, updated_at = NOW() WHERE id = ?`,
+
+    const [antRows] = await conn.execute(
+      `SELECT p.id, p.saldo_pendiente, p.cliente_id, c.cobrador_id
+       FROM Prestamos p
+       JOIN Clientes c ON c.id = p.cliente_id
+       WHERE p.id = ? AND p.deleted_at IS NULL
+       LIMIT 1`,
       [prestamo_anterior_id]
     );
+    if (!antRows.length) {
+      await conn.rollback();
+      return res.status(404).json({ success: false, message: 'Préstamo anterior no encontrado.' });
+    }
+    const ant = antRows[0];
+    const saldoAnt = Number(
+      log?.saldo_pendiente_anterior != null ? log.saldo_pendiente_anterior : ant.saldo_pendiente
+    ) || 0;
+
     const np = nuevo_prestamo;
+    // Recibo = monto de renovación (base). No sumar saldo.
+    const montoRecibo = Number(
+      log?.base_nominal != null
+        ? log.base_nominal
+        : log?.nuevo_desembolso != null
+          ? log.nuevo_desembolso
+          : np.monto_desembolsado
+    );
+    if (!(montoRecibo > 0)) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: 'Monto de renovación inválido.' });
+    }
+    if (montoRecibo + 0.009 < saldoAnt) {
+      await conn.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Monto de renovación (C$ ${montoRecibo.toFixed(2)}) debe cubrir el saldo (C$ ${saldoAnt.toFixed(2)}).`,
+      });
+    }
+    const efectivoEntregar =
+      log?.efectivo_entregar != null
+        ? Number(log.efectivo_entregar)
+        : Number((montoRecibo - saldoAnt).toFixed(2));
+
+    const cobradorCumplimiento = ant.cobrador_id || operadorId || null;
+    // Pago del saldo descontado: entra al cumplimiento del cobrador de ruta
+    if (saldoAnt > 0.009) {
+      const pagoId = uuidv4();
+      const regAdmin =
+        operadorId && cobradorCumplimiento && String(operadorId) !== String(cobradorCumplimiento) ? 1 : 0;
+      await conn.execute(
+        `INSERT INTO Pagos (
+          id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
+          registrado_por_admin, operador_id, is_synced
+        ) VALUES (?, ?, ?, ?, NOW(), 0, 0, ?, ?, 1)`,
+        [
+          pagoId,
+          prestamo_anterior_id,
+          cobradorCumplimiento,
+          saldoAnt,
+          regAdmin,
+          operadorId || cobradorCumplimiento,
+        ]
+      );
+    }
+
+    await conn.execute(
+      `UPDATE Prestamos SET estado = 'Pagado', saldo_pendiente = 0, updated_at = NOW() WHERE id = ?`,
+      [prestamo_anterior_id]
+    );
+
     const entregaId = np.cobrador_entrega_id || operadorId || null;
     await conn.execute(
       `INSERT INTO Prestamos (
@@ -1347,7 +1412,7 @@ async function renovacion(req, res) {
         cobrador_registro_id, cobrador_entrega_id, is_synced
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo', ?, ?, ?, 1)`,
       [
-        np.id, np.cliente_id, np.monto_desembolsado, np.plazo_semanas, np.tasa_interes_aplicada,
+        np.id, np.cliente_id, montoRecibo, np.plazo_semanas, np.tasa_interes_aplicada,
         np.cuota_semanal_base, np.monto_total_pagar, np.saldo_pendiente,
         typeof np.dias_de_cobro === 'string' ? np.dias_de_cobro : JSON.stringify(np.dias_de_cobro || ['LUNES']),
         prestamo_anterior_id, np.fecha_desembolso,
@@ -1359,16 +1424,17 @@ async function renovacion(req, res) {
       `INSERT INTO Renovaciones_Log (
         id, prestamo_anterior_id, prestamo_nuevo_id, saldo_pendiente_anterior, nuevo_desembolso,
         base_nominal, tasa_aplicada, monto_total_a_pagar, cuota_semanal, fecha_renovacion,
-        cobrador_opero_id, cobrador_entrega_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, 1)`,
+        cobrador_opero_id, cobrador_entrega_id, plazo_semanas, efectivo_entregar, is_synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, 1)`,
       [
-        log.id || uuidv4(), prestamo_anterior_id, np.id, log.saldo_pendiente_anterior,
-        log.nuevo_desembolso, log.base_nominal, log.tasa_aplicada, log.monto_total_a_pagar, log.cuota_semanal,
+        log.id || uuidv4(), prestamo_anterior_id, np.id, saldoAnt,
+        montoRecibo, montoRecibo, log.tasa_aplicada, log.monto_total_a_pagar, log.cuota_semanal,
         operadorId,
         log.cobrador_entrega_id || entregaId,
+        np.plazo_semanas || null,
+        efectivoEntregar,
       ]
     );
-    // Modelo flexible: renovación no inserta Cuotas_Calendario.
     const [cliRows] = await conn.execute(
       'SELECT nombre_completo, telefono FROM Clientes WHERE id = ? LIMIT 1',
       [np.cliente_id]
@@ -1379,6 +1445,8 @@ async function renovacion(req, res) {
       success: true,
       id: np.id,
       operador_nombre: operadorNombre,
+      efectivo_entregar: efectivoEntregar,
+      pago_saldo_anterior: saldoAnt,
       cliente_whatsapp: datosWhatsAppCliente(cliRows[0]),
     });
   } catch (e) {

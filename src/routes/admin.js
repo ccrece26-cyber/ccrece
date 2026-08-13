@@ -17,8 +17,9 @@ const {
 } = require('../utils/rutas');
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
 
-async function afterCarteraMutation(conn = null) {
-  await bumpCarteraVersion(conn);
+/** @param {string|string[]|null} cobradorIds — si se pasa, solo esos cobradores marcan ruta desactualizada */
+async function afterCarteraMutation(conn = null, cobradorIds = null) {
+  await bumpCarteraVersion(conn, cobradorIds);
 }
 const {
   leerParametrosFinancieros,
@@ -217,7 +218,7 @@ async function updateCliente(req, res) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [c.cobrador_id]);
       const rutaId = await sincronizarRutaClienteAsignado(id, c.cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
-      await bumpCarteraVersion();
+      await bumpCarteraVersion(null, c.cobrador_id);
       return res.json({ success: true, ruta_id: rutaId });
     }
 
@@ -233,21 +234,29 @@ async function asignarClienteCobrador(req, res) {
     const { id } = req.params;
     const { cobrador_id } = req.body;
 
+    const prev = await query(
+      `SELECT cobrador_id FROM Clientes WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+      [id]
+    );
+    const prevCob = prev[0]?.cobrador_id || null;
+
     await query(
       `UPDATE Clientes SET cobrador_id = ?, updated_at = NOW() WHERE id = ?`,
       [cobrador_id || null, id]
     );
 
+    const idsBump = [...new Set([prevCob, cobrador_id].filter(Boolean))];
+
     if (cobrador_id) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [cobrador_id]);
       const rutaId = await sincronizarRutaClienteAsignado(id, cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
-      await bumpCarteraVersion();
+      await bumpCarteraVersion(null, idsBump.length ? idsBump : cobrador_id);
       return res.json({ success: true, ruta_id: rutaId, mensaje: 'Cliente agregado a ruta optimizada' });
     }
 
     await sincronizarRutaClienteAsignado(id, null);
-    await bumpCarteraVersion();
+    await bumpCarteraVersion(null, idsBump.length ? idsBump : null);
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });

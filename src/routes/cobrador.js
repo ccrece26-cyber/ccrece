@@ -1995,17 +1995,17 @@ async function clientesGps(req, res) {
   }
 }
 
-/** Versión de cartera demo — la app redescarga ruta si cambió (nombres/cuotas/saldos). */
+/** Versión de cartera por cobrador — la app redescarga solo si cambió la suya. */
 async function carteraVersion(req, res) {
   try {
     const { cobradorId } = req.params;
     await exigirUsuarioActivo(cobradorId);
-    const rows = await query(
-      `SELECT valor FROM Parametros_Globales WHERE clave = 'CARTERA_DEMO_VERSION' LIMIT 1`
-    );
+    const { leerCarteraVersionCobrador } = require('../utils/carteraVersion');
+    const version = await leerCarteraVersionCobrador(cobradorId);
     return res.json({
       success: true,
-      version: rows[0]?.valor || '0',
+      version,
+      cobrador_id: cobradorId,
       serverTime: new Date().toISOString(),
     });
   } catch (e) {

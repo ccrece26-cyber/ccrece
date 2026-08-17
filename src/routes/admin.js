@@ -1373,13 +1373,6 @@ async function renovacion(req, res) {
       await conn.rollback();
       return res.status(400).json({ success: false, message: 'Monto de renovación inválido.' });
     }
-    if (montoRecibo + 0.009 < saldoAnt) {
-      await conn.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Monto de renovación (C$ ${montoRecibo.toFixed(2)}) debe cubrir el saldo (C$ ${saldoAnt.toFixed(2)}).`,
-      });
-    }
     const efectivoEntregar =
       log?.efectivo_entregar != null
         ? Number(log.efectivo_entregar)

@@ -85,18 +85,31 @@ async function auditarEstadosPrestamos() {
   );
 }
 
+/** Día calendario Nicaragua (UTC−6) para agrupar cobros. */
+const DIA_NICARAGUA = `DATE(DATE_SUB(pg.fecha_pago, INTERVAL 6 HOUR))`;
+
+/**
+ * Alerta solo cuando hay 2+ pagos con el mismo monto el mismo día local.
+ * Excluye liquidación+renovación (montos distintos) y cobros en días distintos por UTC.
+ */
 async function auditarPagosDuplicadosHoy() {
   return query(
-    `SELECT p.id AS prestamo_id, c.nombre_completo, c.cedula, DATE(pg.fecha_pago) AS dia,
-            COUNT(*) AS n_pagos, SUM(pg.monto_pagado) AS monto_total,
-            GROUP_CONCAT(pg.id ORDER BY pg.fecha_pago SEPARATOR ', ') AS pago_ids
-     FROM Pagos pg
-     JOIN Prestamos p ON pg.prestamo_id = p.id
+    `SELECT p.id AS prestamo_id, c.nombre_completo, c.cedula, dup.dia,
+            dup.n_pagos, dup.monto_total, dup.pago_ids
+     FROM (
+       SELECT pg.prestamo_id, ${DIA_NICARAGUA} AS dia, pg.monto_pagado,
+              COUNT(*) AS n_pagos,
+              SUM(pg.monto_pagado) AS monto_total,
+              GROUP_CONCAT(pg.id ORDER BY pg.fecha_pago SEPARATOR ', ') AS pago_ids
+       FROM Pagos pg
+       JOIN Prestamos p ON pg.prestamo_id = p.id
+       WHERE pg.deleted_at IS NULL AND p.deleted_at IS NULL
+       GROUP BY pg.prestamo_id, ${DIA_NICARAGUA}, pg.monto_pagado
+       HAVING COUNT(*) > 1
+     ) dup
+     JOIN Prestamos p ON dup.prestamo_id = p.id
      JOIN Clientes c ON p.cliente_id = c.id
-     WHERE pg.deleted_at IS NULL AND p.deleted_at IS NULL
-     GROUP BY p.id, c.nombre_completo, c.cedula, DATE(pg.fecha_pago)
-     HAVING COUNT(*) > 1
-     ORDER BY dia DESC, c.nombre_completo
+     ORDER BY dup.dia DESC, c.nombre_completo
      LIMIT 50`
   );
 }

@@ -1341,6 +1341,7 @@ async function renovacion(req, res) {
     const { prestamo_anterior_id, nuevo_prestamo, log, operador } = req.body;
     const operadorId = operador?.id || nuevo_prestamo?.cobrador_registro_id || null;
     const operadorNombre = operador?.nombre || null;
+    const np = nuevo_prestamo || {};
     await conn.beginTransaction();
 
     const [antRows] = await conn.execute(
@@ -1360,7 +1361,6 @@ async function renovacion(req, res) {
       log?.saldo_pendiente_anterior != null ? log.saldo_pendiente_anterior : ant.saldo_pendiente
     ) || 0;
 
-    const np = nuevo_prestamo;
     // Recibo = monto de renovación (base). No sumar saldo.
     const montoRecibo = Number(
       log?.base_nominal != null
@@ -1378,12 +1378,26 @@ async function renovacion(req, res) {
         ? Number(log.efectivo_entregar)
         : Number((montoRecibo - saldoAnt).toFixed(2));
 
-    const cobradorCumplimiento = ant.cobrador_id || operadorId || null;
-    // Pago del saldo descontado: entra al cumplimiento del cobrador de ruta
+    let cobradorCumplimiento = ant.cobrador_id || operadorId || null;
+    if (cobradorCumplimiento) {
+      const [uOk] = await conn.execute(
+        `SELECT id FROM Usuarios WHERE id = ? AND (deleted_at IS NULL OR deleted_at = '') LIMIT 1`,
+        [cobradorCumplimiento]
+      );
+      if (!uOk.length) cobradorCumplimiento = operadorId || null;
+    }
+    if (saldoAnt > 0.009 && !cobradorCumplimiento) {
+      await conn.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'No hay cobrador válido para registrar el cobro del saldo. Cierre sesión y entre de nuevo.',
+      });
+    }
+
+    const regAdmin =
+      operadorId && cobradorCumplimiento && String(operadorId) !== String(cobradorCumplimiento) ? 1 : 0;
     if (saldoAnt > 0.009) {
       const pagoId = uuidv4();
-      const regAdmin =
-        operadorId && cobradorCumplimiento && String(operadorId) !== String(cobradorCumplimiento) ? 1 : 0;
       await conn.execute(
         `INSERT INTO Pagos (
           id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
@@ -1405,19 +1419,52 @@ async function renovacion(req, res) {
       [prestamo_anterior_id]
     );
 
+    const diasArr = Array.isArray(np.dias_de_cobro)
+      ? np.dias_de_cobro
+      : (() => {
+          try {
+            const p = typeof np.dias_de_cobro === 'string' ? JSON.parse(np.dias_de_cobro) : null;
+            return Array.isArray(p) && p.length ? p : ['LUNES'];
+          } catch {
+            return ['LUNES'];
+          }
+        })();
+    const diasJson = JSON.stringify(diasArr);
+    const frecuencia = diasArr.length || 1;
+
+    let tasa = Number(np.tasa_interes_aplicada ?? log?.tasa_aplicada);
+    if (!Number.isFinite(tasa)) tasa = 0;
+    if (tasa > 1 && tasa <= 100) tasa = Number((tasa / 100).toFixed(4));
+    const tasaPrestamo = Number(tasa.toFixed(2));
+    const tasaLog = Number(Math.min(9.9999, Math.max(0, tasa)).toFixed(4));
+
     const entregaId = np.cobrador_entrega_id || operadorId || null;
+    const nuevoId = np.id || uuidv4();
+    const cuota = Number(np.cuota_semanal_base ?? log?.cuota_semanal) || 0;
+    const totalPagar = Number(np.monto_total_pagar ?? log?.monto_total_a_pagar) || 0;
+    const saldoNuevo = Number(np.saldo_pendiente != null ? np.saldo_pendiente : totalPagar) || 0;
+    const plazo = Number(np.plazo_semanas) || null;
+
     await conn.execute(
       `INSERT INTO Prestamos (
         id, cliente_id, monto_desembolsado, plazo_semanas, tasa_interes_aplicada,
-        cuota_semanal_base, monto_total_pagar, saldo_pendiente, dias_de_cobro,
-        renovacion_previa_id, estado, fecha_desembolso,
+        cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana, dias_de_cobro,
+        periodicidad, renovacion_previa_id, estado, fecha_desembolso,
         cobrador_registro_id, cobrador_entrega_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo', ?, ?, ?, 1)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', ?, 'Activo', ?, ?, ?, 1)`,
       [
-        np.id, np.cliente_id, montoRecibo, np.plazo_semanas, np.tasa_interes_aplicada,
-        np.cuota_semanal_base, np.monto_total_pagar, np.saldo_pendiente,
-        typeof np.dias_de_cobro === 'string' ? np.dias_de_cobro : JSON.stringify(np.dias_de_cobro || ['LUNES']),
-        prestamo_anterior_id, np.fecha_desembolso,
+        nuevoId,
+        np.cliente_id,
+        montoRecibo,
+        plazo,
+        tasaPrestamo,
+        cuota,
+        totalPagar,
+        saldoNuevo,
+        frecuencia,
+        diasJson,
+        prestamo_anterior_id,
+        np.fecha_desembolso || null,
         operadorId,
         entregaId,
       ]
@@ -1429,11 +1476,18 @@ async function renovacion(req, res) {
         cobrador_opero_id, cobrador_entrega_id, plazo_semanas, efectivo_entregar, is_synced
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, 1)`,
       [
-        log.id || uuidv4(), prestamo_anterior_id, np.id, saldoAnt,
-        montoRecibo, montoRecibo, log.tasa_aplicada, log.monto_total_a_pagar, log.cuota_semanal,
+        log?.id || uuidv4(),
+        prestamo_anterior_id,
+        nuevoId,
+        saldoAnt,
+        montoRecibo,
+        montoRecibo,
+        tasaLog,
+        totalPagar,
+        cuota,
         operadorId,
-        log.cobrador_entrega_id || entregaId,
-        np.plazo_semanas || null,
+        log?.cobrador_entrega_id || entregaId,
+        plazo,
         efectivoEntregar,
       ]
     );
@@ -1442,17 +1496,25 @@ async function renovacion(req, res) {
       [np.cliente_id]
     );
     await conn.commit();
-    await afterCarteraMutation(conn);
+    try {
+      await afterCarteraMutation(conn, [ant.cobrador_id, operadorId, entregaId].filter(Boolean));
+    } catch (bumpErr) {
+      console.warn('renovacion: bump cartera omitido', bumpErr.message);
+    }
     return res.json({
       success: true,
-      id: np.id,
+      id: nuevoId,
       operador_nombre: operadorNombre,
       efectivo_entregar: efectivoEntregar,
       pago_saldo_anterior: saldoAnt,
       cliente_whatsapp: datosWhatsAppCliente(cliRows[0]),
     });
   } catch (e) {
-    await conn.rollback();
+    try {
+      await conn.rollback();
+    } catch {
+      /* transacción ya cerrada */
+    }
     return res.status(500).json({ success: false, message: e.message });
   } finally {
     conn.release();

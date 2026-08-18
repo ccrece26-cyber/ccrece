@@ -506,7 +506,9 @@ async function pushSync(req, res) {
     const prestamosNuevos = [];
     const prestamosCerrados = [];
     for (const p of prestamos) {
-      if (p.estado && String(p.estado).includes('Renov')) {
+      const est = String(p.estado || '');
+      // Pagado/cerrado primero: si no, el INSERT del renovado choca con "ya tiene crédito activo".
+      if (/renov/i.test(est) || est === 'Pagado') {
         prestamosCerrados.push(p);
       } else {
         prestamosNuevos.push(p);
@@ -658,6 +660,14 @@ async function pushSync(req, res) {
         }
         const dias =
           typeof p.dias_de_cobro === 'string' ? p.dias_de_cobro : JSON.stringify(p.dias_de_cobro || ['LUNES']);
+
+        if (p.renovacion_previa_id) {
+          await conn.execute(
+            `UPDATE Prestamos SET estado = 'Pagado', saldo_pendiente = 0, is_synced = 1, updated_at = NOW()
+             WHERE id = ? AND deleted_at IS NULL`,
+            [p.renovacion_previa_id]
+          );
+        }
 
         const estadoPrestamo = p.estado || 'Activo';
         if (estadoPrestamo === 'Activo') {

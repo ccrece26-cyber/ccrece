@@ -1443,7 +1443,22 @@ async function renovacion(req, res) {
     const cuota = Number(np.cuota_semanal_base ?? log?.cuota_semanal) || 0;
     const totalPagar = Number(np.monto_total_pagar ?? log?.monto_total_a_pagar) || 0;
     const saldoNuevo = Number(np.saldo_pendiente != null ? np.saldo_pendiente : totalPagar) || 0;
-    const plazo = Number(np.plazo_semanas) || null;
+    const semanasProrroga = Math.max(
+      0,
+      Math.floor(Number(np.semanas_prorroga ?? log?.semanas_prorroga ?? 0))
+    );
+    const plazoBase = Math.max(
+      1,
+      Math.floor(
+        Number(
+          np.plazo_base_semanas ??
+            (np.plazo_semanas != null && semanasProrroga
+              ? Number(np.plazo_semanas) - semanasProrroga
+              : np.plazo_semanas)
+        )
+      ) || 0
+    );
+    const plazoTotal = plazoBase + semanasProrroga;
 
     await conn.execute(
       `INSERT INTO Prestamos (
@@ -1456,7 +1471,7 @@ async function renovacion(req, res) {
         nuevoId,
         np.cliente_id,
         montoRecibo,
-        plazo,
+        plazoBase,
         tasaPrestamo,
         cuota,
         totalPagar,
@@ -1469,6 +1484,18 @@ async function renovacion(req, res) {
         entregaId,
       ]
     );
+
+    if (semanasProrroga >= 1) {
+      await aplicarProrrogaEnNube(conn, {
+        prestamo_id: nuevoId,
+        semanas_extra: semanasProrroga,
+        comentario:
+          log?.comentario_prorroga ||
+          `Renovación: ${plazoBase}+${semanasProrroga} sem (prórroga al crear)`,
+        operador_id: operadorId,
+      });
+    }
+
     await conn.execute(
       `INSERT INTO Renovaciones_Log (
         id, prestamo_anterior_id, prestamo_nuevo_id, saldo_pendiente_anterior, nuevo_desembolso,
@@ -1487,7 +1514,7 @@ async function renovacion(req, res) {
         cuota,
         operadorId,
         log?.cobrador_entrega_id || entregaId,
-        plazo,
+        plazoTotal,
         efectivoEntregar,
       ]
     );

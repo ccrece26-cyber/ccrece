@@ -91,7 +91,25 @@ async function rutaDiaria(req, res) {
       }
       prestamos = [...activoPorCliente.values()];
       prestamos = await enriquecerPrestamosConRenovacion(query, prestamos);
-      const prestamoIds = prestamos.map((p) => p.id);
+      // Préstamos Pagados previos (renovación): la app necesita el FK local
+      // para guardar Renovaciones_Log (efectivo = recibo − saldo anterior).
+      const prevIds = [
+        ...new Set(
+          prestamos
+            .map((p) => p.renovacion_previa_id)
+            .filter((id) => id && !prestamos.some((x) => x.id === id))
+        ),
+      ];
+      if (prevIds.length) {
+        const phPrev = prevIds.map(() => '?').join(',');
+        const previos = await query(
+          `SELECT * FROM Prestamos WHERE id IN (${phPrev}) AND deleted_at IS NULL`,
+          prevIds
+        );
+        // Anteriores primero → upsert local no rompe FK de Renovaciones_Log
+        prestamos = [...(previos || []), ...prestamos];
+      }
+      const prestamoIds = prestamos.filter((p) => p.estado === 'Activo').map((p) => p.id);
       // Modelo flexible: no cargar Cuotas_Calendario para la ruta del cobrador.
       cuotas = [];
       if (prestamoIds.length) {

@@ -37,6 +37,7 @@ const {
 const { normalizarCedula, validarCedula, codigoSinDocumento } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
+const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
 const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
@@ -1339,202 +1340,31 @@ async function renovacion(req, res) {
   const conn = await getConnection();
   try {
     const { prestamo_anterior_id, nuevo_prestamo, log, operador } = req.body;
-    const operadorId = operador?.id || nuevo_prestamo?.cobrador_registro_id || null;
-    const operadorNombre = operador?.nombre || null;
-    const np = nuevo_prestamo || {};
     await conn.beginTransaction();
-
-    const [antRows] = await conn.execute(
-      `SELECT p.id, p.saldo_pendiente, p.cliente_id, c.cobrador_id
-       FROM Prestamos p
-       JOIN Clientes c ON c.id = p.cliente_id
-       WHERE p.id = ? AND p.deleted_at IS NULL
-       LIMIT 1`,
-      [prestamo_anterior_id]
-    );
-    if (!antRows.length) {
-      await conn.rollback();
-      return res.status(404).json({ success: false, message: 'Préstamo anterior no encontrado.' });
-    }
-    const ant = antRows[0];
-    const saldoAnt = Number(
-      log?.saldo_pendiente_anterior != null ? log.saldo_pendiente_anterior : ant.saldo_pendiente
-    ) || 0;
-
-    // Recibo = monto de renovación (base). No sumar saldo.
-    const montoRecibo = Number(
-      log?.base_nominal != null
-        ? log.base_nominal
-        : log?.nuevo_desembolso != null
-          ? log.nuevo_desembolso
-          : np.monto_desembolsado
-    );
-    if (!(montoRecibo > 0)) {
-      await conn.rollback();
-      return res.status(400).json({ success: false, message: 'Monto de renovación inválido.' });
-    }
-    const efectivoEntregar =
-      log?.efectivo_entregar != null
-        ? Number(log.efectivo_entregar)
-        : Number((montoRecibo - saldoAnt).toFixed(2));
-
-    let cobradorCumplimiento = ant.cobrador_id || operadorId || null;
-    if (cobradorCumplimiento) {
-      const [uOk] = await conn.execute(
-        `SELECT id FROM Usuarios WHERE id = ? AND (deleted_at IS NULL OR deleted_at = '') LIMIT 1`,
-        [cobradorCumplimiento]
-      );
-      if (!uOk.length) cobradorCumplimiento = operadorId || null;
-    }
-    if (saldoAnt > 0.009 && !cobradorCumplimiento) {
-      await conn.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'No hay cobrador válido para registrar el cobro del saldo. Cierre sesión y entre de nuevo.',
-      });
-    }
-
-    const regAdmin =
-      operadorId && cobradorCumplimiento && String(operadorId) !== String(cobradorCumplimiento) ? 1 : 0;
-    if (saldoAnt > 0.009) {
-      const pagoId = uuidv4();
-      await conn.execute(
-        `INSERT INTO Pagos (
-          id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
-          registrado_por_admin, operador_id, is_synced
-        ) VALUES (?, ?, ?, ?, NOW(), 0, 0, ?, ?, 1)`,
-        [
-          pagoId,
-          prestamo_anterior_id,
-          cobradorCumplimiento,
-          saldoAnt,
-          regAdmin,
-          operadorId || cobradorCumplimiento,
-        ]
-      );
-    }
-
-    await conn.execute(
-      `UPDATE Prestamos SET estado = 'Pagado', saldo_pendiente = 0, updated_at = NOW() WHERE id = ?`,
-      [prestamo_anterior_id]
-    );
-
-    const diasArr = Array.isArray(np.dias_de_cobro)
-      ? np.dias_de_cobro
-      : (() => {
-          try {
-            const p = typeof np.dias_de_cobro === 'string' ? JSON.parse(np.dias_de_cobro) : null;
-            return Array.isArray(p) && p.length ? p : ['LUNES'];
-          } catch {
-            return ['LUNES'];
-          }
-        })();
-    const diasJson = JSON.stringify(diasArr);
-    const frecuencia = diasArr.length || 1;
-
-    let tasa = Number(np.tasa_interes_aplicada ?? log?.tasa_aplicada);
-    if (!Number.isFinite(tasa)) tasa = 0;
-    if (tasa > 1 && tasa <= 100) tasa = Number((tasa / 100).toFixed(4));
-    const tasaPrestamo = Number(tasa.toFixed(2));
-    const tasaLog = Number(Math.min(9.9999, Math.max(0, tasa)).toFixed(4));
-
-    const entregaId = np.cobrador_entrega_id || operadorId || null;
-    const nuevoId = np.id || uuidv4();
-    const cuota = Number(np.cuota_semanal_base ?? log?.cuota_semanal) || 0;
-    const totalPagar = Number(np.monto_total_pagar ?? log?.monto_total_a_pagar) || 0;
-    const saldoNuevo = Number(np.saldo_pendiente != null ? np.saldo_pendiente : totalPagar) || 0;
-    const semanasProrroga = Math.max(
-      0,
-      Math.floor(Number(np.semanas_prorroga ?? log?.semanas_prorroga ?? 0))
-    );
-    const plazoBase = Math.max(
-      1,
-      Math.floor(
-        Number(
-          np.plazo_base_semanas ??
-            (np.plazo_semanas != null && semanasProrroga
-              ? Number(np.plazo_semanas) - semanasProrroga
-              : np.plazo_semanas)
-        )
-      ) || 0
-    );
-    const plazoTotal = plazoBase + semanasProrroga;
-
-    await conn.execute(
-      `INSERT INTO Prestamos (
-        id, cliente_id, monto_desembolsado, plazo_semanas, tasa_interes_aplicada,
-        cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana, dias_de_cobro,
-        periodicidad, renovacion_previa_id, estado, fecha_desembolso,
-        cobrador_registro_id, cobrador_entrega_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', ?, 'Activo', ?, ?, ?, 1)`,
-      [
-        nuevoId,
-        np.cliente_id,
-        montoRecibo,
-        plazoBase,
-        tasaPrestamo,
-        cuota,
-        totalPagar,
-        saldoNuevo,
-        frecuencia,
-        diasJson,
-        prestamo_anterior_id,
-        np.fecha_desembolso || null,
-        operadorId,
-        entregaId,
-      ]
-    );
-
-    if (semanasProrroga >= 1) {
-      await aplicarProrrogaEnNube(conn, {
-        prestamo_id: nuevoId,
-        semanas_extra: semanasProrroga,
-        comentario:
-          log?.comentario_prorroga ||
-          `Renovación: ${plazoBase}+${semanasProrroga} sem (prórroga al crear)`,
-        operador_id: operadorId,
-      });
-    }
-
-    await conn.execute(
-      `INSERT INTO Renovaciones_Log (
-        id, prestamo_anterior_id, prestamo_nuevo_id, saldo_pendiente_anterior, nuevo_desembolso,
-        base_nominal, tasa_aplicada, monto_total_a_pagar, cuota_semanal, fecha_renovacion,
-        cobrador_opero_id, cobrador_entrega_id, plazo_semanas, efectivo_entregar, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, 1)`,
-      [
-        log?.id || uuidv4(),
-        prestamo_anterior_id,
-        nuevoId,
-        saldoAnt,
-        montoRecibo,
-        montoRecibo,
-        tasaLog,
-        totalPagar,
-        cuota,
-        operadorId,
-        log?.cobrador_entrega_id || entregaId,
-        plazoTotal,
-        efectivoEntregar,
-      ]
-    );
-    const [cliRows] = await conn.execute(
-      'SELECT nombre_completo, telefono FROM Clientes WHERE id = ? LIMIT 1',
-      [np.cliente_id]
-    );
+    const out = await ejecutarRenovacionAtomica(conn, {
+      prestamo_anterior_id,
+      nuevo_prestamo,
+      log,
+      operador,
+    });
     await conn.commit();
     try {
-      await afterCarteraMutation(conn, [ant.cobrador_id, operadorId, entregaId].filter(Boolean));
+      await afterCarteraMutation(conn, [
+        out.cobrador_id,
+        operador?.id,
+        nuevo_prestamo?.cobrador_entrega_id,
+      ].filter(Boolean));
     } catch (bumpErr) {
       console.warn('renovacion: bump cartera omitido', bumpErr.message);
     }
     return res.json({
       success: true,
-      id: nuevoId,
-      operador_nombre: operadorNombre,
-      efectivo_entregar: efectivoEntregar,
-      pago_saldo_anterior: saldoAnt,
-      cliente_whatsapp: datosWhatsAppCliente(cliRows[0]),
+      id: out.id,
+      already: !!out.already,
+      operador_nombre: operador?.nombre || out.operador_nombre || null,
+      efectivo_entregar: out.efectivo_entregar,
+      pago_saldo_anterior: out.pago_saldo_anterior,
+      cliente_whatsapp: datosWhatsAppCliente(out.cliente),
     });
   } catch (e) {
     try {
@@ -1542,7 +1372,8 @@ async function renovacion(req, res) {
     } catch {
       /* transacción ya cerrada */
     }
-    return res.status(500).json({ success: false, message: e.message });
+    const status = e.status || 500;
+    return res.status(status).json({ success: false, message: e.message });
   } finally {
     conn.release();
   }

@@ -22,6 +22,9 @@ const { actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../u
 const { capMontoAlSaldo } = require('../utils/cobroMontos');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
+const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
+const { bumpCarteraVersion } = require('../utils/carteraVersion');
+const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
 
 /**
@@ -983,6 +986,33 @@ async function pushSync(req, res) {
         const prestamo = prestamoOk[0];
         const prestamoIdPago = prestamoIdNube;
 
+        const tipoCobroRaw = String(p.tipo_cobro || p.tipo || '')
+          .trim()
+          .toLowerCase();
+        const esPagoRenovacion = tipoCobroRaw === 'renovacion';
+
+        // Nunca subir solo el cobro de renovación: debe existir ya el crédito nuevo
+        // (evita liquidar el viejo sin crear el desembolso, como pasó con Javier CC-129).
+        if (esPagoRenovacion) {
+          const [nuevoRenov] = await conn.execute(
+            `SELECT id FROM Prestamos
+             WHERE renovacion_previa_id = ? AND deleted_at IS NULL
+             LIMIT 1`,
+            [prestamoIdPago]
+          );
+          if (!nuevoRenov.length) {
+            errores.push({
+              tipo: 'pago',
+              id: p.id,
+              code: 'renovacion_incompleta',
+              prestamo_id: prestamoIdPago,
+              message:
+                'Pago de renovación diferido: falta el crédito nuevo en nube. Use renovación completa o sync completo.',
+            });
+            continue;
+          }
+        }
+
         const { inicio, fin } = rangoDiaLocal(p.fecha_pago || new Date());
         const [cobroHoy] = await conn.execute(
           `SELECT id, registrado_por_admin, operador_id, cobrador_id FROM Pagos
@@ -1045,7 +1075,11 @@ async function pushSync(req, res) {
         const pagadoAcumulado = Number(pagadoRows[0]?.total || 0);
         const { esLiquidacion, montoEfectivo } = resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado);
 
-        if (!esLiquidacion && montoEfectivo > Number(prestamo.saldo_pendiente) + 0.01) {
+        // El cierre del préstamo viejo en renovación lo hace el paquete atómico / prestamo sync,
+        // no este cobro suelto (evita marcar Pagado sin crédito nuevo).
+        const aplicarComoLiquidacion = esLiquidacion && !esPagoRenovacion;
+
+        if (!aplicarComoLiquidacion && montoEfectivo > Number(prestamo.saldo_pendiente) + 0.01) {
           errores.push({
             tipo: 'pago',
             id: p.id,
@@ -1057,36 +1091,61 @@ async function pushSync(req, res) {
           continue;
         }
 
-        await conn.execute(
-          `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
-            registrado_por_admin, operador_id, is_synced)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-          [
-            p.id,
-            prestamoIdPago,
-            p.cobrador_id,
-            montoEfectivo,
-            p.fecha_pago,
-            n(p.latitud, 0),
-            n(p.longitud, 0),
-            p.registrado_por_admin ? 1 : 0,
-            p.operador_id || p.cobrador_id,
-          ]
-        );
+        const tipoCobroInsert = tipoCobroRaw || null;
+        try {
+          await conn.execute(
+            `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
+              registrado_por_admin, operador_id, tipo_cobro, is_synced)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            [
+              p.id,
+              prestamoIdPago,
+              p.cobrador_id,
+              montoEfectivo,
+              p.fecha_pago,
+              n(p.latitud, 0),
+              n(p.longitud, 0),
+              p.registrado_por_admin ? 1 : 0,
+              p.operador_id || p.cobrador_id,
+              tipoCobroInsert,
+            ]
+          );
+        } catch (insErr) {
+          if (/tipo_cobro/i.test(String(insErr.message || ''))) {
+            await conn.execute(
+              `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
+                registrado_por_admin, operador_id, is_synced)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+              [
+                p.id,
+                prestamoIdPago,
+                p.cobrador_id,
+                montoEfectivo,
+                p.fecha_pago,
+                n(p.latitud, 0),
+                n(p.longitud, 0),
+                p.registrado_por_admin ? 1 : 0,
+                p.operador_id || p.cobrador_id,
+              ]
+            );
+          } else {
+            throw insErr;
+          }
+        }
 
         await actualizarPrestamoTrasCobro(conn, prestamoIdPago, {
-          esLiquidacion,
+          esLiquidacion: aplicarComoLiquidacion,
           prestamo,
           montoEfectivo,
         });
 
         synced.pagos.push(p.id);
-        if (!Number(p.registrado_por_admin)) {
+        if (!Number(p.registrado_por_admin) && !esPagoRenovacion) {
           cobrosParaNotificar.push({
             prestamo_id: prestamoIdPago,
             cobrador_id: p.cobrador_id,
             monto: montoEfectivo,
-            liquidacion: esLiquidacion,
+            liquidacion: aplicarComoLiquidacion,
           });
         }
         procesados++;
@@ -2051,6 +2110,62 @@ async function historialPrestamosCliente(req, res) {
   }
 }
 
+async function renovacionCobrador(req, res) {
+  const cobradorId = req.params.cobradorId || req.body?.cobradorId;
+  const conn = await getConnection();
+  try {
+    await exigirUsuarioActivo(cobradorId || req.operadorId, conn);
+    const { prestamo_anterior_id, nuevo_prestamo, log, operador, pago_id } = req.body || {};
+    if (!prestamo_anterior_id || !nuevo_prestamo) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan prestamo_anterior_id o nuevo_prestamo.',
+      });
+    }
+    await conn.beginTransaction();
+    const out = await ejecutarRenovacionAtomica(conn, {
+      prestamo_anterior_id,
+      nuevo_prestamo: {
+        ...nuevo_prestamo,
+        cobrador_registro_id: nuevo_prestamo.cobrador_registro_id || cobradorId,
+        cobrador_entrega_id: nuevo_prestamo.cobrador_entrega_id || cobradorId,
+      },
+      log,
+      operador: operador || { id: cobradorId },
+      pago_id: pago_id || null,
+    });
+    await conn.commit();
+    try {
+      await bumpCarteraVersion(null, [out.cobrador_id, cobradorId].filter(Boolean));
+    } catch (bumpErr) {
+      console.warn('renovacion cobrador: bump omitido', bumpErr.message);
+    }
+    return res.json({
+      success: true,
+      id: out.id,
+      already: !!out.already,
+      pago_id: out.pago_id || null,
+      renovacion_log_id: out.renovacion_log_id || null,
+      efectivo_entregar: out.efectivo_entregar,
+      pago_saldo_anterior: out.pago_saldo_anterior,
+      cliente_whatsapp: datosWhatsAppCliente(out.cliente),
+    });
+  } catch (e) {
+    try {
+      await conn.rollback();
+    } catch {
+      /* */
+    }
+    if (e.code === 'CUENTA_INACTIVA' || e.status === 403) {
+      return responderErrorUsuario(res, e);
+    }
+    const status = e.status || 500;
+    return res.status(status).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 module.exports = {
   rutaDiaria,
   clientesGps,
@@ -2066,4 +2181,5 @@ module.exports = {
   aplicarProrrogaCobrador,
   pagosPorFecha,
   historialPrestamosCliente,
+  renovacionCobrador,
 };

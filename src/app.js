@@ -116,6 +116,7 @@ app.get('/api/cobrador/cierre-hoy/:cobradorId', cobrador.cierreHoy);
 app.get('/api/cobrador/cierre-caja/:cobradorId/resumen', cobrador.resumenCierreCaja);
 app.post('/api/cobrador/cierre-caja/:cobradorId', cobrador.registrarCierreCaja);
 app.post('/api/cobrador/sync/push', cobrador.pushSync);
+app.post('/api/cobrador/renovaciones/:cobradorId', cobrador.renovacionCobrador);
 app.get('/api/cobrador/sync/aviso/:cobradorId', cobrador.syncAviso);
 app.get('/api/cobrador/correcciones/:cobradorId', cobrador.getCorreccionesAdmin);
 app.post('/api/cobrador/solicitud-correccion', cobrador.crearSolicitudCorreccion);

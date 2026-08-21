@@ -64,6 +64,7 @@ async function migrarTablasSync() {
     'ALTER TABLE Renovaciones_Log ADD COLUMN efectivo_entregar DECIMAL(12,2) DEFAULT NULL',
     'ALTER TABLE Pagos ADD COLUMN registrado_por_admin TINYINT(1) DEFAULT 0',
     'ALTER TABLE Pagos ADD COLUMN operador_id VARCHAR(36) DEFAULT NULL',
+    "ALTER TABLE Pagos ADD COLUMN tipo_cobro VARCHAR(30) DEFAULT NULL COMMENT 'cobro|liquidacion|renovacion|fuera_dia|espontaneo'",
     'ALTER TABLE Gestiones_No_Pago ADD COLUMN registrado_por_admin TINYINT(1) DEFAULT 0',
     'ALTER TABLE Gestiones_No_Pago ADD COLUMN operador_id VARCHAR(36) DEFAULT NULL',
     `CREATE TABLE IF NOT EXISTS Licencias_Codigos (

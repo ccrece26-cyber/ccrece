@@ -23,6 +23,7 @@ const { capMontoAlSaldo } = require('../utils/cobroMontos');
 const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
+const { enriquecerPrestamosConRenovacion } = require('../utils/enriquecerRenovacionPrestamo');
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
@@ -89,6 +90,7 @@ async function rutaDiaria(req, res) {
         if (!activoPorCliente.has(p.cliente_id)) activoPorCliente.set(p.cliente_id, p);
       }
       prestamos = [...activoPorCliente.values()];
+      prestamos = await enriquecerPrestamosConRenovacion(query, prestamos);
       const prestamoIds = prestamos.map((p) => p.id);
       // Modelo flexible: no cargar Cuotas_Calendario para la ruta del cobrador.
       cuotas = [];
@@ -1835,7 +1837,8 @@ async function listPrestamosCobrador(req, res) {
        ORDER BY c.nombre_completo`,
       [cobradorId]
     );
-    return res.json({ success: true, data: rows });
+    const data = await enriquecerPrestamosConRenovacion(query, rows);
+    return res.json({ success: true, data });
   } catch (e) {
     return responderErrorUsuario(res, e);
   }

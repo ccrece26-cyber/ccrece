@@ -38,6 +38,7 @@ const { normalizarCedula, validarCedula, codigoSinDocumento } = require('../util
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
+const { enriquecerPrestamosConRenovacion } = require('../utils/enriquecerRenovacionPrestamo');
 const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
 const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
@@ -281,7 +282,9 @@ async function listPrestamosActivos(req, res) {
               uc.nombre_completo AS cobrador,
               ur.nombre_completo AS cobrador_registro_nombre,
               ue.nombre_completo AS cobrador_entrega_nombre,
-              uop.nombre_completo AS cobrador_opero_nombre
+              uop.nombre_completo AS cobrador_opero_nombre,
+              r.id AS renovacion_log_id,
+              r.saldo_pendiente_anterior, r.nuevo_desembolso, r.base_nominal, r.efectivo_entregar
        FROM Prestamos p
        JOIN Clientes c ON p.cliente_id = c.id
        LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id

@@ -6,6 +6,8 @@ const { capMontoAlSaldo } = require('../utils/cobroMontos');
 const { seleccionarCuotaAgenda, montoCobroDelDia } = require('../utils/cuotasCalendario');
 const { montoVisitaHoy, esCuotaDiaDesembolso } = require('../utils/diasCobro');
 const { hoyISO } = require('../utils/zonaHoraria');
+const { bumpCarteraVersion } = require('../utils/carteraVersion');
+const { recalcularCierreCajaSiExiste } = require('../utils/recalcularCierreCaja');
 const {
   ensureRutaForOperador,
   agregarClienteARuta,
@@ -212,8 +214,25 @@ async function postPagoCampo(req, res) {
   try {
     await conn.beginTransaction();
     const result = await registrarPagoEnNube(conn, req.body);
+    let cierreRecalc = null;
+    if (result.cobrador_id && result.fecha_operacion) {
+      cierreRecalc = await recalcularCierreCajaSiExiste(
+        conn,
+        result.cobrador_id,
+        result.fecha_operacion
+      );
+    }
     await conn.commit();
-    return res.json({ success: true, ...result });
+    try {
+      await bumpCarteraVersion(null, [result.cobrador_id, req.body?.operador_id].filter(Boolean));
+    } catch (_) {
+      /* no bloquear cobro */
+    }
+    return res.json({
+      success: true,
+      ...result,
+      cierre_recalculado: cierreRecalc && !cierreRecalc.sin_cambio ? cierreRecalc : null,
+    });
   } catch (e) {
     await conn.rollback();
     return res.status(400).json({ success: false, message: e.message });

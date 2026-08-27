@@ -1026,8 +1026,10 @@ async function pushSync(req, res) {
               id: p.id,
               code: 'renovacion_incompleta',
               prestamo_id: prestamoIdPago,
+              cliente_id: prestamo.cliente_id || p.cliente_id || null,
+              monto: Number(p.monto_pagado) || null,
               message:
-                'Pago de renovación diferido: falta el crédito nuevo en nube. Use renovación completa o sync completo.',
+                'Renovación incompleta: falta el crédito nuevo en la nube. Sincronice de nuevo (sync completo).',
             });
             continue;
           }
@@ -1105,7 +1107,9 @@ async function pushSync(req, res) {
             id: p.id,
             code: 'monto_supera_saldo',
             prestamo_id: prestamoIdPago,
+            cliente_id: prestamo.cliente_id || p.cliente_id || null,
             saldo_nube: Number(prestamo.saldo_pendiente),
+            monto: montoEfectivo,
             message: `Monto supera saldo pendiente (C$ ${Number(prestamo.saldo_pendiente).toFixed(2)})`,
           });
           continue;

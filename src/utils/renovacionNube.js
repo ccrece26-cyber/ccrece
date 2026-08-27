@@ -4,6 +4,7 @@
  */
 const { v4: uuidv4 } = require('uuid');
 const { aplicarProrrogaEnNube } = require('./prorrogasNube');
+const { resolverFechaOperacion } = require('./fechaOperacion');
 
 function parseDias(np) {
   if (Array.isArray(np.dias_de_cobro)) return np.dias_de_cobro.filter(Boolean);
@@ -26,6 +27,13 @@ async function ejecutarRenovacionAtomica(conn, opts) {
   const { prestamo_anterior_id, nuevo_prestamo, log = {}, operador = {}, pago_id = null } = opts;
   const np = nuevo_prestamo || {};
   const operadorId = operador?.id || np.cobrador_registro_id || null;
+
+  const fechaOp = resolverFechaOperacion(
+    np.fecha_desembolso || log.fecha_renovacion || null,
+    { permitirPasado: true }
+  );
+  const fechaDesembolso = fechaOp.dia;
+  const fechaPagoSql = fechaOp.fechaSql;
 
   const [antRows] = await conn.execute(
     `SELECT p.id, p.saldo_pendiente, p.estado, p.cliente_id, c.cobrador_id
@@ -128,12 +136,13 @@ async function ejecutarRenovacionAtomica(conn, opts) {
         `INSERT INTO Pagos (
           id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
           registrado_por_admin, operador_id, tipo_cobro, is_synced
-        ) VALUES (?, ?, ?, ?, NOW(), 0, 0, ?, ?, 'renovacion', 1)`,
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, 'renovacion', 1)`,
         [
           pagoSaldoId,
           prestamo_anterior_id,
           cobradorCumplimiento,
           saldoAnt,
+          fechaPagoSql,
           regAdmin,
           operadorId || cobradorCumplimiento,
         ]
@@ -145,12 +154,13 @@ async function ejecutarRenovacionAtomica(conn, opts) {
           `INSERT INTO Pagos (
             id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
             registrado_por_admin, operador_id, is_synced
-          ) VALUES (?, ?, ?, ?, NOW(), 0, 0, ?, ?, 1)`,
+          ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, 1)`,
           [
             pagoSaldoId,
             prestamo_anterior_id,
             cobradorCumplimiento,
             saldoAnt,
+            fechaPagoSql,
             regAdmin,
             operadorId || cobradorCumplimiento,
           ]
@@ -218,7 +228,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
       frecuencia,
       diasJson,
       prestamo_anterior_id,
-      np.fecha_desembolso || null,
+      fechaDesembolso,
       np.numero_recibo_fisico || null,
       operadorId,
       entregaId,
@@ -242,7 +252,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
       id, prestamo_anterior_id, prestamo_nuevo_id, saldo_pendiente_anterior, nuevo_desembolso,
       base_nominal, tasa_aplicada, monto_total_a_pagar, cuota_semanal, fecha_renovacion,
       cobrador_opero_id, cobrador_entrega_id, plazo_semanas, efectivo_entregar, is_synced
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?, ?, 1)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
     [
       logId,
       prestamo_anterior_id,
@@ -253,6 +263,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
       tasaLog,
       totalPagar,
       cuota,
+      fechaPagoSql,
       operadorId,
       log.cobrador_entrega_id || entregaId,
       plazoTotal,

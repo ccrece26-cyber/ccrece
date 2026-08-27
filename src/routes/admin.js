@@ -44,6 +44,7 @@ const { aplicarCastigoPerdidaEnNube } = require('../utils/castigoPerdidaNube');
 const { armarReportePerdidas } = require('../utils/reportePerdidas');
 const { armarReporteVencidos, enriquecerPrestamosProrroga } = require('../utils/reporteVencidos');
 const { recalcularSaldoPrestamoDesdePagos } = require('../utils/registrarPagoNube');
+const { recalcularCierresCajaSiExisten } = require('../utils/recalcularCierreCaja');
 const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix, whereCierreCalendarioDia } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
@@ -759,6 +760,8 @@ async function crearPrestamo(req, res) {
     const p = req.body;
     const operadorId = p.operador?.id || p.cobrador_registro_id || null;
     const id = p.id || uuidv4();
+    const { resolverFechaOperacion } = require('../utils/fechaOperacion');
+    const fechaOp = resolverFechaOperacion(p.fecha_desembolso, { permitirPasado: true });
     await conn.beginTransaction();
 
     let fiadorId = p.fiador_id || null;
@@ -800,7 +803,7 @@ async function crearPrestamo(req, res) {
         p.saldo_pendiente,
         p.frecuencia_semana || 1,
         typeof p.dias_de_cobro === 'string' ? p.dias_de_cobro : JSON.stringify(p.dias_de_cobro || ['LUNES']),
-        p.fecha_desembolso,
+        fechaOp.dia,
         operadorId,
         p.cobrador_entrega_id || null,
       ]
@@ -1204,7 +1207,7 @@ async function updatePago(req, res) {
 
     await conn.beginTransaction();
     const [rows] = await conn.execute(
-      `SELECT pg.id, pg.prestamo_id, pg.monto_pagado, pg.fecha_pago
+      `SELECT pg.id, pg.prestamo_id, pg.monto_pagado, pg.fecha_pago, pg.cobrador_id
        FROM Pagos pg WHERE pg.id = ? AND pg.deleted_at IS NULL LIMIT 1`,
       [id]
     );
@@ -1215,6 +1218,7 @@ async function updatePago(req, res) {
     const pago = rows[0];
     const montoAnterior = Number(pago.monto_pagado);
     const diff = montoNuevo - montoAnterior;
+    const fechaAnterior = pago.fecha_pago;
 
     await conn.execute(
       `UPDATE Pagos SET monto_pagado = ?, fecha_pago = COALESCE(?, fecha_pago),
@@ -1233,6 +1237,17 @@ async function updatePago(req, res) {
       [id]
     );
 
+    // Si ese día ya tenía cierre, realinear monto/transacciones (solo si existe).
+    const [pagoAfter] = await conn.execute(
+      `SELECT cobrador_id, fecha_pago FROM Pagos WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    const cobradorCaja = pagoAfter[0]?.cobrador_id || pago.cobrador_id;
+    const cierresRecalc = await recalcularCierresCajaSiExisten(conn, cobradorCaja, [
+      fechaAnterior,
+      pagoAfter[0]?.fecha_pago || fechaNueva,
+    ]);
+
     await conn.commit();
     const [actualizado] = await conn.execute(
       `SELECT pg.*, c.nombre_completo, c.cedula, p.saldo_pendiente
@@ -1242,7 +1257,11 @@ async function updatePago(req, res) {
        WHERE pg.id = ?`,
       [id]
     );
-    return res.json({ success: true, data: actualizado[0] });
+    return res.json({
+      success: true,
+      data: actualizado[0],
+      cierres_recalculados: cierresRecalc.filter((c) => !c.sin_cambio),
+    });
   } catch (e) {
     await conn.rollback();
     return res.status(500).json({ success: false, message: e.message });
@@ -1259,7 +1278,7 @@ async function deletePago(req, res) {
 
     await conn.beginTransaction();
     const [rows] = await conn.execute(
-      `SELECT pg.id, pg.prestamo_id, pg.monto_pagado, pg.cobrador_id
+      `SELECT pg.id, pg.prestamo_id, pg.monto_pagado, pg.cobrador_id, pg.fecha_pago
        FROM Pagos pg WHERE pg.id = ? AND pg.deleted_at IS NULL LIMIT 1`,
       [id]
     );
@@ -1289,6 +1308,10 @@ async function deletePago(req, res) {
       [id]
     );
 
+    const cierresRecalc = await recalcularCierresCajaSiExisten(conn, pago.cobrador_id, [
+      pago.fecha_pago,
+    ]);
+
     await conn.commit();
 
     const [prest] = await conn.execute(
@@ -1307,6 +1330,7 @@ async function deletePago(req, res) {
         saldo_pendiente: prest[0]?.saldo_pendiente ?? saldoNuevo,
         estado_prestamo: prest[0]?.estado,
       },
+      cierres_recalculados: cierresRecalc.filter((c) => !c.sin_cambio),
     });
   } catch (e) {
     await conn.rollback();

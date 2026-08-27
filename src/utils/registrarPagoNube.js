@@ -1,7 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const { calcularLiquidacionAnticipada } = require('./finanzasNube');
 const { exigirUsuarioActivo } = require('./assertUsuarioActivo');
-const { rangoDiaLocal } = require('./fechasSql');
+const { resolverFechaOperacion } = require('./fechaOperacion');
 
 async function resolverCobradorAsignado(conn, prestamoId) {
   const [rows] = await conn.execute(
@@ -38,6 +38,7 @@ async function registrarPagoEnNube(conn, opts) {
     latitud = 0,
     longitud = 0,
     tipo = 'personalizado',
+    fecha_pago: fechaPagoInput = null,
   } = opts;
 
   if (operadorId) await exigirUsuarioActivo(operadorId, conn);
@@ -49,8 +50,12 @@ async function registrarPagoEnNube(conn, opts) {
   if (!prestRows.length) throw new Error('Prestamo no encontrado');
   const prestamo = prestRows[0];
 
-  // Caja del que cobra (admin en modo campo = su caja, no la del cobrador asignado).
-  const cobradorRegistro = operadorId || (await resolverCobradorAsignado(conn, prestamoId));
+  const fechaOp = resolverFechaOperacion(fechaPagoInput, { permitirPasado: true });
+  const cobradorAsignado = await resolverCobradorAsignado(conn, prestamoId);
+  // Hoy en campo: caja del admin. Día pasado: caja del cobrador asignado (como form).
+  const cobradorRegistro = fechaOp.esHoy
+    ? operadorId || cobradorAsignado
+    : cobradorAsignado || operadorId;
   const esLiquidacion = tipo === 'liquidacion';
   let montoEfectivo = Number(montoInput);
 
@@ -82,23 +87,24 @@ async function registrarPagoEnNube(conn, opts) {
     throw new Error(`Monto supera saldo pendiente (C$ ${Number(prestamo.saldo_pendiente).toFixed(2)})`);
   }
 
-  const { inicio, fin } = rangoDiaLocal(new Date());
-  const [cobroHoy] = await conn.execute(
+  const { inicio, fin } = fechaOp.rango;
+  const [cobroDia] = await conn.execute(
     `SELECT id, registrado_por_admin FROM Pagos
      WHERE prestamo_id = ? AND deleted_at IS NULL AND fecha_pago >= ? AND fecha_pago < ?
      LIMIT 1`,
     [prestamoId, inicio, fin]
   );
-  if (cobroHoy.length) {
+  if (cobroDia.length) {
+    const etiqueta = fechaOp.esHoy ? 'hoy' : `el ${fechaOp.dia}`;
     throw new Error(
-      Number(cobroHoy[0].registrado_por_admin) === 1
-        ? 'Este credito ya fue cobrado hoy.'
-        : 'Este credito ya tiene un cobro registrado hoy por el cobrador.'
+      Number(cobroDia[0].registrado_por_admin) === 1
+        ? `Este credito ya fue cobrado ${etiqueta}.`
+        : `Este credito ya tiene un cobro registrado ${etiqueta} por el cobrador.`
     );
   }
 
   const pagoId = uuidv4();
-  const fecha = new Date().toISOString();
+  const fecha = fechaOp.fechaSql;
 
   await conn.execute(
     `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
@@ -119,6 +125,8 @@ async function registrarPagoEnNube(conn, opts) {
     montoAplicado: montoEfectivo,
     liquidacion: esLiquidacion,
     cobrador_id: cobradorRegistro,
+    fecha_pago: fecha,
+    fecha_operacion: fechaOp.dia,
     estado_visita: 'cobrado_admin',
   };
 }

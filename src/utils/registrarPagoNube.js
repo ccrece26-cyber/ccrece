@@ -48,10 +48,25 @@ async function registrarPagoEnNube(conn, opts) {
     [prestamoId]
   );
   if (!prestRows.length) throw new Error('Prestamo no encontrado');
-  const prestamo = prestRows[0];
+  let prestamo = prestRows[0];
+
+  // Cobro normal sobre crédito ya cerrado (p. ej. teléfono con UUID viejo tras renovación).
+  if (tipo !== 'liquidacion' && tipo !== 'renovacion') {
+    const [activoRows] = await conn.execute(
+      `SELECT * FROM Prestamos
+       WHERE cliente_id = ? AND estado = 'Activo' AND deleted_at IS NULL AND id != ?
+       ORDER BY fecha_desembolso DESC LIMIT 1`,
+      [prestamo.cliente_id, prestamoId]
+    );
+    const cerrado = prestamo.estado === 'Pagado' || Number(prestamo.saldo_pendiente) <= 0.01;
+    if (cerrado && activoRows.length) {
+      prestamo = activoRows[0];
+    }
+  }
+  const prestamoIdEfectivo = prestamo.id;
 
   const fechaOp = resolverFechaOperacion(fechaPagoInput, { permitirPasado: true });
-  const cobradorAsignado = await resolverCobradorAsignado(conn, prestamoId);
+  const cobradorAsignado = await resolverCobradorAsignado(conn, prestamoIdEfectivo);
   // Hoy en campo: caja del admin. Día pasado: caja del cobrador asignado (como form).
   const cobradorRegistro = fechaOp.esHoy
     ? operadorId || cobradorAsignado
@@ -92,7 +107,7 @@ async function registrarPagoEnNube(conn, opts) {
     `SELECT id, registrado_por_admin FROM Pagos
      WHERE prestamo_id = ? AND deleted_at IS NULL AND fecha_pago >= ? AND fecha_pago < ?
      LIMIT 1`,
-    [prestamoId, inicio, fin]
+    [prestamoIdEfectivo, inicio, fin]
   );
   if (cobroDia.length) {
     const etiqueta = fechaOp.esHoy ? 'hoy' : `el ${fechaOp.dia}`;
@@ -110,10 +125,10 @@ async function registrarPagoEnNube(conn, opts) {
     `INSERT INTO Pagos (id, prestamo_id, cobrador_id, monto_pagado, fecha_pago, latitud, longitud,
       registrado_por_admin, operador_id, is_synced, editado_por_admin_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 1, NOW())`,
-    [pagoId, prestamoId, cobradorRegistro, montoEfectivo, fecha, latitud, longitud, operadorId]
+    [pagoId, prestamoIdEfectivo, cobradorRegistro, montoEfectivo, fecha, latitud, longitud, operadorId]
   );
 
-  const nuevoSaldo = await actualizarPrestamoTrasCobro(conn, prestamoId, {
+  const nuevoSaldo = await actualizarPrestamoTrasCobro(conn, prestamoIdEfectivo, {
     esLiquidacion,
     prestamo,
     montoEfectivo,

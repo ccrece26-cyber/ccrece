@@ -418,14 +418,22 @@ async function resolverClienteIdEnNube(conn, localId, idMapClientes, { cedula, c
 async function resolverPrestamoIdEnNube(
   conn,
   prestamoId,
-  { clienteId, clienteCedula, cobradorId, idMapClientes, idMapPrestamos } = {}
+  { clienteId, clienteCedula, cobradorId, idMapClientes, idMapPrestamos, preferirActivo = false } = {}
 ) {
-  if (idMapPrestamos?.[prestamoId]) return idMapPrestamos[prestamoId];
+  if (idMapPrestamos?.[prestamoId]) {
+    const mapped = idMapPrestamos[prestamoId];
+    if (!preferirActivo) return mapped;
+    return redirigirPrestamoActivoSiCerrado(conn, mapped, { idMapPrestamos, localId: prestamoId });
+  }
   const [ex] = await conn.execute(
-    'SELECT id FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+    'SELECT id, cliente_id, estado, saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1',
     [prestamoId]
   );
-  if (ex.length) return ex[0].id;
+  if (ex.length) {
+    const resolved = ex[0].id;
+    if (!preferirActivo) return resolved;
+    return redirigirPrestamoActivoSiCerrado(conn, resolved, { idMapPrestamos, localId: prestamoId });
+  }
 
   let cid = clienteId;
   if (!cid && clienteCedula) {
@@ -447,6 +455,38 @@ async function resolverPrestamoIdEnNube(
     }
   }
   return null;
+}
+
+/**
+ * Tras renovación el teléfono puede conservar el UUID del crédito viejo (Pagado).
+ * Los cobros normales deben ir al crédito Activo del mismo cliente.
+ */
+async function redirigirPrestamoActivoSiCerrado(conn, prestamoId, { idMapPrestamos, localId } = {}) {
+  const [rows] = await conn.execute(
+    `SELECT id, cliente_id, estado, saldo_pendiente FROM Prestamos
+     WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    [prestamoId]
+  );
+  if (!rows.length) return prestamoId;
+  const p = rows[0];
+  const cerrado = p.estado === 'Pagado' || Number(p.saldo_pendiente) <= 0.01;
+  if (!cerrado) return prestamoId;
+  const [activo] = await conn.execute(
+    `SELECT id FROM Prestamos
+     WHERE cliente_id = ? AND estado = 'Activo' AND deleted_at IS NULL AND id != ?
+     ORDER BY fecha_desembolso DESC LIMIT 1`,
+    [p.cliente_id, prestamoId]
+  );
+  if (!activo.length) return prestamoId;
+  if (idMapPrestamos && localId) idMapPrestamos[localId] = activo[0].id;
+  return activo[0].id;
+}
+
+function esPagoRenovacionPreliminar(p) {
+  const tipo = String(p?.tipo_cobro || p?.tipo || '')
+    .trim()
+    .toLowerCase();
+  return tipo === 'renovacion';
 }
 
 const PUSH_ERROR_CODES = {
@@ -992,6 +1032,7 @@ async function pushSync(req, res) {
           cobradorId: p.cobrador_id || cobradorId,
           idMapClientes,
           idMapPrestamos,
+          preferirActivo: !esPagoRenovacionPreliminar(p),
         });
         if (!prestamoIdNube) {
           throw new Error(`Prestamo ${p.prestamo_id} no existe en TiDB aun.`);

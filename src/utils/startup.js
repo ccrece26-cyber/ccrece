@@ -2,7 +2,7 @@ const { query } = require('../config/db');
 const { repararFiadoresHistoricos, migrarInlineFiadoresPrestamos } = require('./fiadoresNube');
 const { migrarCedulasSinGuion } = require('./migrarCedulas');
 const { ensurePerformanceIndexes } = require('./ensureIndexes');
-const { repararRutasClientesDuplicadas } = require('./rutas');
+const { repararRutasClientesDuplicadas, repararTodosClientesSinRuta } = require('./rutas');
 
 async function migrarColumnasPrestamo() {
   const alters = ['ALTER TABLE Fiadores MODIFY COLUMN cedula VARCHAR(40) NOT NULL'];
@@ -139,6 +139,8 @@ async function runStartupTasks() {
     if (n > 0) console.log(`   Fiadores reparados en nube: ${n}`);
     const rutas = await repararRutasClientesDuplicadas();
     if (rutas > 0) console.log(`   Rutas duplicadas corregidas: ${rutas}`);
+    const sinRuta = await repararTodosClientesSinRuta();
+    if (sinRuta > 0) console.log(`   Clientes sin ruta vinculados: ${sinRuta}`);
   } catch (e) {
     console.warn('   Aviso tareas de arranque:', e.message);
   }

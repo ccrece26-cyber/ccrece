@@ -16,7 +16,11 @@ const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
 const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = require('../utils/fechasSql');
 const { hoyISO, toFechaISO } = require('../utils/zonaHoraria');
-const { ensureRutaForCobrador, sincronizarRutaClienteAsignado } = require('../utils/rutas');
+const {
+  ensureRutaForCobrador,
+  sincronizarRutaClienteAsignado,
+  repararClientesSinRutaDeCobrador,
+} = require('../utils/rutas');
 const { exigirUsuarioActivo, responderErrorUsuario } = require('../utils/assertUsuarioActivo');
 const { actualizarPrestamoTrasCobro, resolverLiquidacionEnPush } = require('../utils/registrarPagoNube');
 const { capMontoAlSaldo } = require('../utils/cobroMontos');
@@ -40,6 +44,8 @@ async function rutaDiaria(req, res) {
     const { cobradorId } = req.params;
     const hoy = fechaCalendarioISO();
     const { inicio: diaIni, fin: diaFin } = rangoDiaLocal(hoy);
+
+    await repararClientesSinRutaDeCobrador(cobradorId);
 
     await initSecuenciaCliente(query);
     const secRows = await query(`SELECT valor FROM Parametros_Globales WHERE clave = 'SEC_CLIENTE'`);
@@ -632,6 +638,13 @@ async function pushSync(req, res) {
             ]
           );
           idMapClientes[c.id] = cloudId;
+          if (cobId) {
+            const [cobRowUp] = await conn.execute(
+              'SELECT nombre_completo FROM Usuarios WHERE id = ? LIMIT 1',
+              [cobId]
+            );
+            await sincronizarRutaClienteAsignado(cloudId, cobId, cobRowUp[0]?.nombre_completo, conn);
+          }
         } else {
           let clientId = esIdClienteOficial(c.id) ? c.id : await nextClienteId(conn);
           const [idTaken] = await conn.execute('SELECT id FROM Clientes WHERE id = ?', [clientId]);
@@ -856,6 +869,18 @@ async function pushSync(req, res) {
               p.cobrador_entrega_id || null,
             ]
           );
+        }
+        const [clCob] = await conn.execute(
+          'SELECT cobrador_id FROM Clientes WHERE id = ? AND deleted_at IS NULL LIMIT 1',
+          [clienteId]
+        );
+        const cid = clCob[0]?.cobrador_id;
+        if (cid) {
+          const [cobRowP] = await conn.execute(
+            'SELECT nombre_completo FROM Usuarios WHERE id = ? LIMIT 1',
+            [cid]
+          );
+          await sincronizarRutaClienteAsignado(clienteId, cid, cobRowP[0]?.nombre_completo, conn);
         }
         synced.prestamos.push(p.id);
         procesados++;

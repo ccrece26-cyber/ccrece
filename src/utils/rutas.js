@@ -158,6 +158,53 @@ async function vincularClientesCobradorARuta(cobradorId) {
   return rutaId;
 }
 
+/** Clientes con cobrador_id pero sin parada en la ruta activa de ese cobrador. */
+async function listarClientesSinRutaDeCobrador(cobradorId, conn = null) {
+  return runSql(
+    conn,
+    `SELECT c.id, c.nombre_completo
+     FROM Clientes c
+     LEFT JOIN Ruta_Clientes rc ON rc.cliente_id = c.id
+     LEFT JOIN Rutas r ON r.id = rc.ruta_id AND r.cobrador_id = c.cobrador_id
+       AND r.activa = 1 AND r.deleted_at IS NULL
+     WHERE c.deleted_at IS NULL AND c.cobrador_id = ? AND r.id IS NULL
+     ORDER BY c.nombre_completo`,
+    [cobradorId]
+  );
+}
+
+/** Vincula a la ruta del cobrador a quienes tienen cobrador_id pero no están en Ruta_Clientes. */
+async function repararClientesSinRutaDeCobrador(cobradorId, conn = null) {
+  const rows = await listarClientesSinRutaDeCobrador(cobradorId, conn);
+  if (!rows.length) return 0;
+  const cobRows = await runSql(conn, `SELECT nombre_completo FROM Usuarios WHERE id = ? LIMIT 1`, [
+    cobradorId,
+  ]);
+  const nombre = cobRows[0]?.nombre_completo;
+  for (const row of rows) {
+    await sincronizarRutaClienteAsignado(row.id, cobradorId, nombre, conn);
+  }
+  return rows.length;
+}
+
+/** Repara huérfanos de todos los cobradores (arranque del servidor). */
+async function repararTodosClientesSinRuta(conn = null) {
+  const cobradores = await runSql(
+    conn,
+    `SELECT DISTINCT c.cobrador_id
+     FROM Clientes c
+     LEFT JOIN Ruta_Clientes rc ON rc.cliente_id = c.id
+     LEFT JOIN Rutas r ON r.id = rc.ruta_id AND r.cobrador_id = c.cobrador_id
+       AND r.activa = 1 AND r.deleted_at IS NULL
+     WHERE c.deleted_at IS NULL AND c.cobrador_id IS NOT NULL AND r.id IS NULL`
+  );
+  let total = 0;
+  for (const row of cobradores) {
+    total += await repararClientesSinRutaDeCobrador(row.cobrador_id, conn);
+  }
+  return total;
+}
+
 /** Elimina clientes en rutas que no coinciden con su cobrador_id asignado. */
 async function repararRutasClientesDuplicadas(conn = null) {
   const sql = `DELETE rc FROM Ruta_Clientes rc
@@ -189,5 +236,8 @@ module.exports = {
   optimizarOrdenRuta,
   sincronizarRutasCobradores,
   vincularClientesCobradorARuta,
+  listarClientesSinRutaDeCobrador,
+  repararClientesSinRutaDeCobrador,
+  repararTodosClientesSinRuta,
   repararRutasClientesDuplicadas,
 };

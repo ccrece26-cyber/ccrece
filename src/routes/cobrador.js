@@ -2181,10 +2181,15 @@ async function carteraVersion(req, res) {
     await exigirUsuarioActivo(cobradorId);
     const { leerCarteraVersionCobrador } = require('../utils/carteraVersion');
     const version = await leerCarteraVersionCobrador(cobradorId);
+    const clientes = await query(
+      `SELECT id FROM Clientes WHERE cobrador_id = ? AND deleted_at IS NULL`,
+      [cobradorId]
+    );
     return res.json({
       success: true,
       version,
       cobrador_id: cobradorId,
+      cliente_ids: (clientes || []).map((r) => r.id),
       serverTime: new Date().toISOString(),
     });
   } catch (e) {

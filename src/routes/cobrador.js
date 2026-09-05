@@ -1116,6 +1116,25 @@ async function pushSync(req, res) {
             procesados++;
             continue;
           }
+          // Solo deduplicar si el cobro en nube es del mismo operador/cobrador.
+          // Si es de otro (p. ej. admin u otro día mal filtrado), no marcar synced:
+          // el local debe seguir intentando o reportar error.
+          const mismoOperador =
+            existente.cobrador_id === p.cobrador_id ||
+            existente.operador_id === p.cobrador_id ||
+            existente.cobrador_id === (p.operador_id || p.cobrador_id) ||
+            existente.operador_id === (p.operador_id || p.cobrador_id);
+          if (!mismoOperador && Number(existente.registrado_por_admin) !== 1) {
+            errores.push({
+              tipo: 'pago',
+              id: p.id,
+              code: 'ya_cobrado_hoy',
+              prestamo_id: prestamoIdPago,
+              nube_id: existente.id,
+              message: 'Este crédito ya tiene un cobro registrado hoy en la nube.',
+            });
+            continue;
+          }
           synced.pagos.push(p.id);
           synced.pagos_id_duplicados = synced.pagos_id_duplicados || [];
           synced.pagos_id_duplicados.push({

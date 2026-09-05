@@ -13,6 +13,7 @@ const {
   optimizarOrdenRuta,
   sincronizarRutasCobradores,
   vincularClientesCobradorARuta,
+  quitarClienteDeRutaOperador,
   ESTELI_CENTRO,
 } = require('../utils/rutas');
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
@@ -250,17 +251,28 @@ async function asignarClienteCobrador(req, res) {
 
     const idsBump = [...new Set([prevCob, cobrador_id].filter(Boolean))];
 
+    // Sacar de la ruta del cobrador anterior de forma explícita (además de sincronizar destino).
+    if (prevCob && prevCob !== cobrador_id) {
+      await quitarClienteDeRutaOperador(prevCob, id);
+    }
+
     if (cobrador_id) {
       const [cob] = await query('SELECT nombre_completo FROM Usuarios WHERE id = ?', [cobrador_id]);
       const rutaId = await sincronizarRutaClienteAsignado(id, cobrador_id, cob?.nombre_completo);
       await optimizarOrdenRuta(rutaId);
       await bumpCarteraVersion(null, idsBump.length ? idsBump : cobrador_id);
-      return res.json({ success: true, ruta_id: rutaId, mensaje: 'Cliente agregado a ruta optimizada' });
+      return res.json({
+        success: true,
+        ruta_id: rutaId,
+        cobrador_previo: prevCob,
+        cobrador_nuevo: cobrador_id,
+        mensaje: 'Cliente reasignado; ambos cobradores deben refrescar ruta',
+      });
     }
 
     await sincronizarRutaClienteAsignado(id, null);
     await bumpCarteraVersion(null, idsBump.length ? idsBump : null);
-    return res.json({ success: true });
+    return res.json({ success: true, cobrador_previo: prevCob, cobrador_nuevo: null });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }

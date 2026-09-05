@@ -1659,6 +1659,18 @@ async function getReporte(req, res) {
           },
         });
       }
+      case 'operaciones-dia': {
+        const { cargarDatosOperacionesDia } = require('../utils/reporteOperacionesDia');
+        const fecha = String(req.query.fecha || desde || hasta || hoyISO()).slice(0, 10);
+        if (desde && hasta && desde !== hasta) {
+          return res.status(400).json({
+            success: false,
+            message: 'El reporte de operaciones es por un solo día. Use la misma fecha en desde y hasta.',
+          });
+        }
+        const data = await cargarDatosOperacionesDia(fecha);
+        return res.json({ success: true, data });
+      }
       case 'arqueo': {
         const resumen = await query(
           `SELECT COUNT(*) AS cierres_registrados,

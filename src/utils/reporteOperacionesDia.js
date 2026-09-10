@@ -340,10 +340,30 @@ function workbookToBuffer(wb) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
+/** Excel + PDF idénticos al script CLI (buffers en base64). */
+async function generarPaqueteOperacionesDia(fechaRaw) {
+  const datos = await cargarDatosOperacionesDia(fechaRaw);
+  const wb = buildWorkbookOperacionesDia(datos);
+  const excelBuf = workbookToBuffer(wb);
+  const { buildPdfOperacionesDia } = require('./reporteOperacionesDiaPdf');
+  const pdfBuf = await buildPdfOperacionesDia(datos);
+  const fecha = datos.fecha;
+  return {
+    ...datos,
+    archivos: {
+      excel_nombre: `Reporte_operaciones_${fecha}.xlsx`,
+      excel_base64: Buffer.from(excelBuf).toString('base64'),
+      pdf_nombre: `Reporte_operaciones_${fecha}.pdf`,
+      pdf_base64: Buffer.from(pdfBuf).toString('base64'),
+    },
+  };
+}
+
 module.exports = {
   cargarDatosOperacionesDia,
   buildWorkbookOperacionesDia,
   workbookToBuffer,
+  generarPaqueteOperacionesDia,
   labelCobrador,
   fmtHora,
   num,

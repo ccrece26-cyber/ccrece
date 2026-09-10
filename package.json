@@ -19,6 +19,7 @@
     "verificar-migracion": "node src/scripts/verificar-migracion.js",
     "renombrar-schema": "node src/scripts/renombrar-schema.js",
     "seed-demo": "node src/scripts/seed-demo-esteli.js",
+    "export-cartera-csv": "node src/scripts/exportar-cartera-desde-bd.js",
     "vistas-reporte": "node src/scripts/create-views.js"
   },
   "dependencies": {
@@ -29,6 +30,7 @@
     "express": "^5.1.0",
     "mysql2": "^3.14.1",
     "nodemailer": "^7.0.13",
+    "pdfkit": "^0.19.1",
     "uuid": "^11.1.0",
     "xlsx": "^0.18.5"
   }

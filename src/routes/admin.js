@@ -1671,12 +1671,17 @@ async function getReporte(req, res) {
             message: 'El reporte de operaciones es por un solo día. Use la misma fecha en desde y hasta.',
           });
         }
+        const formatoRaw = String(req.query.formato || req.query.format || '').toLowerCase();
         const conArchivos =
           req.query.archivos === '1' ||
           req.query.archivos === 'true' ||
-          String(req.query.format || '').toLowerCase() === 'files';
+          ['excel', 'pdf', 'ambos', 'files'].includes(formatoRaw);
+        let formatoArchivo = 'ambos';
+        if (formatoRaw === 'excel' || formatoRaw === 'xlsx') formatoArchivo = 'excel';
+        else if (formatoRaw === 'pdf') formatoArchivo = 'pdf';
+        else if (formatoRaw === 'ambos' || formatoRaw === 'files') formatoArchivo = 'ambos';
         const data = conArchivos
-          ? await generarPaqueteOperacionesDia(fecha)
+          ? await generarPaqueteOperacionesDia(fecha, { formato: formatoArchivo })
           : await cargarDatosOperacionesDia(fecha);
         return res.json({ success: true, data });
       }

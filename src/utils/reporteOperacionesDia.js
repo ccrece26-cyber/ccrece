@@ -340,23 +340,36 @@ function workbookToBuffer(wb) {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
-/** Excel + PDF idénticos al script CLI (buffers en base64). */
-async function generarPaqueteOperacionesDia(fechaRaw) {
+/**
+ * Archivos idénticos al script CLI.
+ * @param {string} fechaRaw
+ * @param {{ formato?: 'excel'|'pdf'|'ambos' }} [opts]
+ */
+async function generarPaqueteOperacionesDia(fechaRaw, opts = {}) {
+  const formato = String(opts.formato || 'ambos').toLowerCase();
+  const quiereExcel = formato === 'excel' || formato === 'ambos' || formato === 'files';
+  const quierePdf = formato === 'pdf' || formato === 'ambos' || formato === 'files';
+  if (!quiereExcel && !quierePdf) {
+    throw new Error('Formato inválido: use excel, pdf o ambos');
+  }
+
   const datos = await cargarDatosOperacionesDia(fechaRaw);
-  const wb = buildWorkbookOperacionesDia(datos);
-  const excelBuf = workbookToBuffer(wb);
-  const { buildPdfOperacionesDia } = require('./reporteOperacionesDiaPdf');
-  const pdfBuf = await buildPdfOperacionesDia(datos);
   const fecha = datos.fecha;
-  return {
-    ...datos,
-    archivos: {
-      excel_nombre: `Reporte_operaciones_${fecha}.xlsx`,
-      excel_base64: Buffer.from(excelBuf).toString('base64'),
-      pdf_nombre: `Reporte_operaciones_${fecha}.pdf`,
-      pdf_base64: Buffer.from(pdfBuf).toString('base64'),
-    },
-  };
+  const archivos = {};
+
+  if (quiereExcel) {
+    const excelBuf = workbookToBuffer(buildWorkbookOperacionesDia(datos));
+    archivos.excel_nombre = `Reporte_operaciones_${fecha}.xlsx`;
+    archivos.excel_base64 = Buffer.from(excelBuf).toString('base64');
+  }
+  if (quierePdf) {
+    const { buildPdfOperacionesDia } = require('./reporteOperacionesDiaPdf');
+    const pdfBuf = await buildPdfOperacionesDia(datos);
+    archivos.pdf_nombre = `Reporte_operaciones_${fecha}.pdf`;
+    archivos.pdf_base64 = Buffer.from(pdfBuf).toString('base64');
+  }
+
+  return { ...datos, archivos };
 }
 
 module.exports = {

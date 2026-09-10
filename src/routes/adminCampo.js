@@ -265,7 +265,7 @@ async function getBuscarClientesCampo(req, res) {
   try {
     const adminId = req.query.admin_id || null;
     const alcance = req.query.alcance === 'ruta' ? 'ruta' : 'todos';
-    const texto = String(req.query.q || '').trim().toLowerCase();
+    const textoRaw = String(req.query.q || '').trim();
     const hoy = hoyISO();
     const { inicio: diaIni, fin: diaFin } = require('../utils/fechasSql').rangoDiaLocal(hoy);
     const { debeIncluirEnAgenda } = require('../utils/diasCobro');
@@ -326,11 +326,22 @@ async function getBuscarClientesCampo(req, res) {
         periodicidad: row.periodicidad,
       });
       if (tocaHoy) continue;
-      if (texto) {
-        const hay = [row.nombre_completo, row.cedula, row.cliente_id, row.direccion, row.telefono]
-          .map((x) => String(x || '').toLowerCase())
-          .some((s) => s.includes(texto));
-        if (!hay) continue;
+      if (textoRaw) {
+        const esCodigo = /^CC-?\d*$/i.test(textoRaw) || /^\d+$/.test(textoRaw);
+        if (esCodigo) {
+          const digits = textoRaw.replace(/^CC-?/i, '').replace(/\D/g, '');
+          if (digits) {
+            const id = String(row.cliente_id || '');
+            const m = id.match(/^CC-?(\d+)$/i);
+            const codigoDigits = m ? m[1] : (/^\d+$/.test(id) ? id : '');
+            if (codigoDigits !== digits) continue;
+          }
+        } else {
+          const hay = [row.nombre_completo, row.cedula, row.cliente_id, row.direccion, row.telefono]
+            .map((x) => String(x || '').toLowerCase())
+            .some((s) => s.includes(textoRaw.toLowerCase()));
+          if (!hay) continue;
+        }
       }
       const montoRaw = montoVisitaHoy(row.cuota_semanal_base, row.dias_de_cobro, {
         periodicidad: row.periodicidad,

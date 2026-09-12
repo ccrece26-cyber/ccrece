@@ -949,7 +949,15 @@ async function listPagosDelDia(req, res) {
              COALESCE(u.nombre_completo, uo.nombre_completo) AS cobrador_nombre,
              u.nombre_completo AS cobro_registrado_por_nombre,
              uc.nombre_completo AS ruta_cobrador_nombre,
-             p.saldo_pendiente, p.estado AS estado_prestamo,
+             GREATEST(0, ROUND(
+               p.saldo_pendiente + COALESCE((
+                 SELECT SUM(px.monto_pagado) FROM Pagos px
+                 WHERE px.prestamo_id = pg.prestamo_id AND px.deleted_at IS NULL
+                   AND (px.fecha_pago > pg.fecha_pago
+                        OR (px.fecha_pago = pg.fecha_pago AND px.id > pg.id))
+               ), 0), 2)
+             ) AS saldo_pendiente,
+             p.estado AS estado_prestamo,
              p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro
       FROM Pagos pg
       INNER JOIN Prestamos p ON pg.prestamo_id = p.id

@@ -1993,7 +1993,15 @@ async function pagosPorFecha(req, res) {
       `SELECT pg.id, pg.prestamo_id, pg.cobrador_id, pg.monto_pagado, pg.fecha_pago,
               pg.registrado_por_admin, pg.operador_id, pg.editado_por_admin_at,
               c.id AS cliente_id, c.nombre_completo, c.cedula, c.telefono,
-              p.saldo_pendiente, p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro,
+              GREATEST(0, ROUND(
+                p.saldo_pendiente + COALESCE((
+                  SELECT SUM(px.monto_pagado) FROM Pagos px
+                  WHERE px.prestamo_id = pg.prestamo_id AND px.deleted_at IS NULL
+                    AND (px.fecha_pago > pg.fecha_pago
+                         OR (px.fecha_pago = pg.fecha_pago AND px.id > pg.id))
+                ), 0), 2)
+              ) AS saldo_pendiente,
+              p.fecha_desembolso, p.plazo_semanas, p.dias_de_cobro,
               u.nombre_completo AS cobrador_nombre
        FROM Pagos pg
        INNER JOIN Prestamos p ON pg.prestamo_id = p.id

@@ -1,4 +1,10 @@
 const { v4: uuidv4 } = require('uuid');
+const {
+  calcularCuotaYDistribucion,
+  TASA_MENSUAL_DEFAULT,
+  parseTasaMensualInput,
+} = require('./finanzasNube');
+const { recalcularSaldoPrestamoDesdePagos } = require('./registrarPagoNube');
 
 function parseDiasCobro(raw) {
   if (Array.isArray(raw)) return raw.filter(Boolean);
@@ -100,7 +106,8 @@ async function contarSemanasRestantes(_conn, _prestamoId, cuotaSemanal) {
 /**
  * Corrige plazo base vs semanas de prórroga mal marcadas.
  * Soft-borra historial con semanas_extra > 0, fija plazo_base y reaplica prórroga.
- * Por defecto recalcula cuota = monto_total_pagar / (base + prórroga).
+ * Por defecto recalcula interés global solo con la base (10%/mes × meses)
+ * y cuota = nuevo_total / (base + prórroga). La prórroga no suma interés.
  */
 async function corregirPlazoProrrogaEnNube(conn, opts) {
   const {
@@ -108,6 +115,8 @@ async function corregirPlazoProrrogaEnNube(conn, opts) {
     plazo_base: plazoBaseRaw,
     semanas_prorroga: semanasProrrogaRaw = 0,
     recalcular_cuota: recalcularCuota = true,
+    recalcular_interes: recalcularInteres = true,
+    tasa_mensual: tasaMensualRaw = null,
     comentario = '',
     operador_id: operadorId = null,
   } = opts;
@@ -145,7 +154,10 @@ async function corregirPlazoProrrogaEnNube(conn, opts) {
   const plazoAntes = Number(prestamo.plazo_semanas) || 0;
   const baseAntes = Math.max(1, plazoAntes - semanasAntes);
   const cuotaAntes = Number(prestamo.cuota_semanal_base) || 0;
-  const totalPagar = Number(prestamo.monto_total_pagar) || 0;
+  const totalAntes = Number(prestamo.monto_total_pagar) || 0;
+  const tasaAntes = Number(prestamo.tasa_interes_aplicada) || 0;
+  const capital = Number(prestamo.monto_desembolsado) || 0;
+  const dias = parseDiasCobro(prestamo.dias_de_cobro);
 
   await conn.execute(
     `UPDATE Historial_Prorrogas
@@ -155,25 +167,56 @@ async function corregirPlazoProrrogaEnNube(conn, opts) {
   );
 
   const plazoTotal = plazoBase + semanasProrroga;
+  const debeRecalcularInteres = recalcularInteres !== false;
+  const debeRecalcularCuota = recalcularCuota !== false;
+
+  let nuevaTasa = tasaAntes;
+  let nuevoTotal = totalAntes;
+  let interesTotal = Number((totalAntes - capital).toFixed(2));
   let nuevaCuota = cuotaAntes;
-  if (recalcularCuota !== false && totalPagar > 0 && plazoTotal > 0) {
-    nuevaCuota = Number((totalPagar / plazoTotal).toFixed(2));
+
+  if (debeRecalcularInteres && capital > 0) {
+    const tasaMensual =
+      tasaMensualRaw != null && String(tasaMensualRaw).trim() !== ''
+        ? parseTasaMensualInput(tasaMensualRaw)
+        : TASA_MENSUAL_DEFAULT;
+    const calc = calcularCuotaYDistribucion(capital, plazoBase, dias, tasaMensual);
+    nuevaTasa = calc.tasaInteresAplicada;
+    nuevoTotal = calc.montoTotalPagar;
+    interesTotal = calc.interesTotal;
+  }
+
+  if (debeRecalcularCuota && nuevoTotal > 0 && plazoTotal > 0) {
+    nuevaCuota = Number((nuevoTotal / plazoTotal).toFixed(2));
   }
 
   await conn.execute(
     `UPDATE Prestamos SET
       plazo_semanas = ?,
       cuota_semanal_base = ?,
+      tasa_interes_aplicada = ?,
+      monto_total_pagar = ?,
       updated_at = NOW(),
       is_synced = 1
      WHERE id = ?`,
-    [plazoBase, nuevaCuota, prestamoId]
+    [plazoBase, nuevaCuota, nuevaTasa, nuevoTotal, prestamoId]
   );
+
+  await recalcularSaldoPrestamoDesdePagos(conn, prestamoId);
+
+  const [saldoRows] = await conn.execute(
+    `SELECT saldo_pendiente FROM Prestamos WHERE id = ? LIMIT 1`,
+    [prestamoId]
+  );
+  const saldoActual = Number(saldoRows[0]?.saldo_pendiente) || 0;
 
   const nota =
     comentario ||
     `Corrección admin: base ${plazoBase} sem` +
-      (semanasProrroga > 0 ? ` + ${semanasProrroga} prórroga` : ' (sin prórroga)');
+      (semanasProrroga > 0 ? ` + ${semanasProrroga} prórroga` : ' (sin prórroga)') +
+      (debeRecalcularInteres
+        ? ` · interés ${(nuevaTasa * 100).toFixed(1)}% (C$ ${interesTotal.toFixed(2)})`
+        : '');
 
   let prorroga = null;
   if (semanasProrroga > 0) {
@@ -191,16 +234,19 @@ async function corregirPlazoProrrogaEnNube(conn, opts) {
         id, prestamo_id, semanas_extra, saldo_anterior, nueva_cuota_semanal,
         fecha_prorroga, comentario, is_synced
       ) VALUES (?, ?, 0, ?, ?, ?, ?, 1)`,
-      [id, prestamoId, Number(prestamo.saldo_pendiente) || 0, nuevaCuota, fecha, nota]
+      [id, prestamoId, saldoActual, nuevaCuota, fecha, nota]
     );
   }
 
   const [finalRows] = await conn.execute(
-    `SELECT plazo_semanas, cuota_semanal_base, monto_total_pagar, saldo_pendiente
+    `SELECT plazo_semanas, cuota_semanal_base, monto_total_pagar, saldo_pendiente,
+            tasa_interes_aplicada, monto_desembolsado
      FROM Prestamos WHERE id = ? LIMIT 1`,
     [prestamoId]
   );
   const finalP = finalRows[0] || {};
+  const totalFinal = Number(finalP.monto_total_pagar) || 0;
+  const capitalFinal = Number(finalP.monto_desembolsado) || 0;
 
   return {
     prestamo_id: prestamoId,
@@ -211,20 +257,31 @@ async function corregirPlazoProrrogaEnNube(conn, opts) {
       plazo_base: baseAntes,
       semanas_prorroga: semanasAntes,
       cuota_semanal_base: cuotaAntes,
+      tasa_interes_aplicada: tasaAntes,
+      monto_total_pagar: totalAntes,
+      interes_global: Number((totalAntes - capital).toFixed(2)),
     },
     despues: {
       plazo_semanas: Number(finalP.plazo_semanas),
       plazo_base: plazoBase,
       semanas_prorroga: semanasProrroga,
       cuota_semanal_base: Number(finalP.cuota_semanal_base),
-      monto_total_pagar: Number(finalP.monto_total_pagar),
+      tasa_interes_aplicada: Number(finalP.tasa_interes_aplicada),
+      monto_total_pagar: totalFinal,
       saldo_pendiente: Number(finalP.saldo_pendiente),
+      interes_global: Number((totalFinal - capitalFinal).toFixed(2)),
     },
-    recalcular_cuota: recalcularCuota !== false,
+    recalcular_cuota: debeRecalcularCuota,
+    recalcular_interes: debeRecalcularInteres,
     prorroga,
-    mensaje: `Plazo corregido: ${plazoBase} base` +
+    mensaje:
+      `Plazo corregido: ${plazoBase} base` +
       (semanasProrroga > 0 ? ` + ${semanasProrroga} prórroga` : '') +
-      ` = ${plazoTotal} sem. Cuota ${nuevaCuota.toFixed(2)}.`,
+      ` = ${plazoTotal} sem` +
+      (debeRecalcularInteres
+        ? ` · interés ${(nuevaTasa * 100).toFixed(1)}% (C$ ${interesTotal.toFixed(2)}) · total C$ ${nuevoTotal.toFixed(2)}`
+        : '') +
+      ` · cuota ${nuevaCuota.toFixed(2)}.`,
   };
 }
 

@@ -2198,6 +2198,8 @@ async function corregirPlazoProrroga(req, res) {
       plazo_base: req.body.plazo_base,
       semanas_prorroga: req.body.semanas_prorroga,
       recalcular_cuota: req.body.recalcular_cuota,
+      recalcular_interes: req.body.recalcular_interes,
+      tasa_mensual: req.body.tasa_mensual,
       comentario: req.body.comentario || '',
       operador_id: req.operadorId,
     });

@@ -37,7 +37,7 @@ const {
 } = require('../utils/cargaMasivaGarantias');
 const { normalizarCedula, validarCedula, codigoSinDocumento } = require('../utils/cedulaNic');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
-const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
+const { aplicarProrrogaEnNube, corregirPlazoProrrogaEnNube } = require('../utils/prorrogasNube');
 const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
 const { enriquecerPrestamosConRenovacion } = require('../utils/enriquecerRenovacionPrestamo');
 const { aplicarNegociacionVencido } = require('../utils/negociacionVencido');
@@ -2188,6 +2188,30 @@ async function aplicarProrroga(req, res) {
   }
 }
 
+/** Corrige plazo base y/o semanas de prórroga mal marcadas. */
+async function corregirPlazoProrroga(req, res) {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const resultado = await corregirPlazoProrrogaEnNube(conn, {
+      prestamo_id: req.body.prestamo_id || req.params.id,
+      plazo_base: req.body.plazo_base,
+      semanas_prorroga: req.body.semanas_prorroga,
+      recalcular_cuota: req.body.recalcular_cuota,
+      comentario: req.body.comentario || '',
+      operador_id: req.operadorId,
+    });
+    await conn.commit();
+    await afterCarteraMutation(conn, resultado.cobrador_id ? [resultado.cobrador_id] : null);
+    return res.json({ success: true, data: resultado });
+  } catch (e) {
+    await conn.rollback();
+    return res.status(400).json({ success: false, message: e.message });
+  } finally {
+    conn.release();
+  }
+}
+
 /** Prórroga, mora y/o perdón de saldo (negociación admin). */
 async function negociarCredito(req, res) {
   const conn = await getConnection();
@@ -2330,6 +2354,7 @@ module.exports = {
   listGarantiasPrestamo,
   agregarGarantiasPrestamo,
   aplicarProrroga,
+  corregirPlazoProrroga,
   negociarCredito,
   castigarPerdida,
   exportCarteraImportacion,

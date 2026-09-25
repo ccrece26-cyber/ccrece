@@ -49,6 +49,7 @@ const { recalcularCierresCajaSiExisten } = require('../utils/recalcularCierreCaj
 const { rangoDiaLocal, rangoPeriodoLocal, desdeCorreccionesUnix, whereCierreCalendarioDia } = require('../utils/fechasSql');
 const { hoyISO } = require('../utils/zonaHoraria');
 const { generarRespaldoSql } = require('../utils/respaldoSql');
+const { cargarCumplimientoCliente } = require('../utils/cumplimientoCliente');
 
 const txt = (v) => {
   if (v === null || v === undefined) return null;
@@ -1136,80 +1137,15 @@ async function listPagosDetalle(req, res) {
   }
 }
 
-/** Estado de cuenta: préstamo, cuotas y abonos de un cliente. */
+/** Estado de cuenta: préstamo, cuotas estimadas, abonos e historial de un cliente. */
 async function getEstadoCuentaCliente(req, res) {
   try {
     const { id } = req.params;
-    const clientes = await query(
-      `SELECT c.*, uc.nombre_completo AS cobrador_nombre
-       FROM Clientes c
-       LEFT JOIN Usuarios uc ON c.cobrador_id = uc.id
-       WHERE c.id = ? AND c.deleted_at IS NULL
-       LIMIT 1`,
-      [id]
-    );
-    if (!clientes.length) {
+    const data = await cargarCumplimientoCliente(query, id);
+    if (!data) {
       return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
     }
-    const cliente = clientes[0];
-
-    const prestamos = await query(
-      `SELECT p.*, ur.nombre_completo AS registrado_por, ue.nombre_completo AS entregado_por
-       FROM Prestamos p
-       LEFT JOIN Usuarios ur ON p.cobrador_registro_id = ur.id
-       LEFT JOIN Usuarios ue ON p.cobrador_entrega_id = ue.id
-       WHERE p.cliente_id = ? AND p.deleted_at IS NULL
-       ORDER BY p.fecha_desembolso DESC`,
-      [id]
-    );
-
-    const prestamoActivo = prestamos.find((p) => p.estado === 'Activo') || prestamos[0] || null;
-    let cuotas = [];
-    let pagos = [];
-
-    if (prestamoActivo) {
-      cuotas = await query(
-        `SELECT cc.id AS cuota_id, cc.fecha_programada, cc.monto_programado, cc.monto_pagado,
-                cc.estado AS estado_cuota, cc.updated_at,
-                (SELECT COUNT(*) FROM Cuotas_Calendario q
-                 WHERE q.prestamo_id = cc.prestamo_id AND q.deleted_at IS NULL
-                   AND q.fecha_programada < cc.fecha_programada) + 1 AS numero_cuota
-         FROM Cuotas_Calendario cc
-         WHERE cc.prestamo_id = ? AND cc.deleted_at IS NULL
-         ORDER BY cc.fecha_programada ASC`,
-        [prestamoActivo.id]
-      );
-
-      pagos = await query(
-        `SELECT pg.id, pg.monto_pagado, pg.fecha_pago, pg.registrado_por_admin,
-                u.nombre_completo AS cobrador_nombre
-         FROM Pagos pg
-         LEFT JOIN Usuarios u ON pg.cobrador_id = u.id
-         WHERE pg.prestamo_id = ? AND pg.deleted_at IS NULL
-         ORDER BY pg.fecha_pago ASC`,
-        [prestamoActivo.id]
-      );
-    }
-
-    const totalAbonado = pagos.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
-    const cuotasPagadas = cuotas.filter((c) => c.estado_cuota === 'Pagada').length;
-    const cuotasPendientes = cuotas.filter((c) => ['Programada', 'Parcial'].includes(c.estado_cuota)).length;
-
-    return res.json({
-      success: true,
-      cliente: { ...cliente, codigo_cliente: cliente.id },
-      prestamo_activo: prestamoActivo,
-      prestamos,
-      cuotas,
-      pagos,
-      resumen: {
-        saldo_pendiente: prestamoActivo ? Number(prestamoActivo.saldo_pendiente) : 0,
-        total_abonado: totalAbonado,
-        cuotas_pagadas: cuotasPagadas,
-        cuotas_pendientes: cuotasPendientes,
-        estado_prestamo: prestamoActivo?.estado || 'Sin préstamo',
-      },
-    });
+    return res.json({ success: true, ...data });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
   }

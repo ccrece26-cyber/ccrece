@@ -31,6 +31,7 @@ const { enriquecerPrestamosConRenovacion } = require('../utils/enriquecerRenovac
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
+const { cargarCumplimientoCliente } = require('../utils/cumplimientoCliente');
 
 /**
  * Clientes asignados al cobrador + ruta del dia.
@@ -2233,6 +2234,28 @@ async function historialPrestamosCliente(req, res) {
   }
 }
 
+/** Cumplimiento / cuotas estimadas + historial de abonos (nube). */
+async function cumplimientoCliente(req, res) {
+  try {
+    const { cobradorId, clienteId } = req.params;
+    await exigirUsuarioActivo(cobradorId);
+    const cli = await query(
+      `SELECT id FROM Clientes WHERE id = ? AND cobrador_id = ? AND deleted_at IS NULL LIMIT 1`,
+      [clienteId, cobradorId]
+    );
+    if (!cli.length) {
+      return res.status(403).json({ success: false, message: 'Cliente no asignado a este cobrador' });
+    }
+    const data = await cargarCumplimientoCliente(query, clienteId);
+    if (!data) {
+      return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
+    }
+    return res.json({ success: true, ...data });
+  } catch (e) {
+    return responderErrorUsuario(res, e);
+  }
+}
+
 async function renovacionCobrador(req, res) {
   const cobradorId = req.params.cobradorId || req.body?.cobradorId;
   const conn = await getConnection();
@@ -2304,5 +2327,6 @@ module.exports = {
   aplicarProrrogaCobrador,
   pagosPorFecha,
   historialPrestamosCliente,
+  cumplimientoCliente,
   renovacionCobrador,
 };

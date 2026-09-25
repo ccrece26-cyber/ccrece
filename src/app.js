@@ -109,6 +109,7 @@ app.post('/api/admin/campo/gestion-no-pago', adminCampo.postGestionNoPagoCampo);
 app.get('/api/cobrador/pagos/:cobradorId', cobrador.pagosPorFecha);
 app.get('/api/cobrador/prestamos/:cobradorId', cobrador.listPrestamosCobrador);
 app.get('/api/cobrador/clientes/:clienteId/prestamos/:cobradorId', cobrador.historialPrestamosCliente);
+app.get('/api/cobrador/clientes/:clienteId/cumplimiento/:cobradorId', cobrador.cumplimientoCliente);
 app.post('/api/cobrador/prorrogas/:cobradorId', cobrador.aplicarProrrogaCobrador);
 app.get('/api/cobrador/ruta-diaria/:cobradorId', cobrador.rutaDiaria);
 app.get('/api/cobrador/clientes-gps/:cobradorId', cobrador.clientesGps);

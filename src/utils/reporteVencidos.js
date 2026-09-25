@@ -179,6 +179,7 @@ async function enriquecerPrestamosProrroga(rows) {
       Number((cuotaSemanal / freq).toFixed(2))
     );
     return {
+      ...p,
       id: p.id,
       cliente_id: p.cliente_id,
       nombre_completo: p.nombre_completo,
@@ -205,6 +206,18 @@ async function enriquecerPrestamosProrroga(rows) {
       proxima_cuota_id: null,
       proxima_cuota_fecha: null,
       proxima_cuota_monto: montoSugerido > 0.01 ? montoSugerido : null,
+      // Renovación (no perder al reimprimir comprobante desde admin/campo)
+      renovacion_previa_id: p.renovacion_previa_id || null,
+      renovacion_log_id: p.renovacion_log_id || null,
+      saldo_pendiente_anterior:
+        p.saldo_pendiente_anterior != null ? Number(p.saldo_pendiente_anterior) : null,
+      nuevo_desembolso: p.nuevo_desembolso != null ? Number(p.nuevo_desembolso) : null,
+      base_nominal: p.base_nominal != null ? Number(p.base_nominal) : null,
+      efectivo_entregar: p.efectivo_entregar != null ? Number(p.efectivo_entregar) : null,
+      numero_recibo_fisico: p.numero_recibo_fisico || null,
+      cobrador_registro_nombre: p.cobrador_registro_nombre || null,
+      cobrador_entrega_nombre: p.cobrador_entrega_nombre || null,
+      cobrador_opero_nombre: p.cobrador_opero_nombre || null,
     };
   });
 }

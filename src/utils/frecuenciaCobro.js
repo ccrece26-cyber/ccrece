@@ -131,6 +131,18 @@ const resolverFrecuenciaCobro = ({
     };
   }
 
+  // SEMANAL explícito: no dejar que dias_mes residual (estado UI) force DIAS_MES.
+  if (hint === TIPO_SEMANAL || hint === 'SEMANA') {
+    const diasSemana = parseDiasCobroSemanal(rawDias);
+    return {
+      tipo: TIPO_SEMANAL,
+      diasSemana,
+      diasMes: [],
+      diasParaAgenda: diasSemana,
+      periodicidad: TIPO_SEMANAL,
+    };
+  }
+
   if (rawMes != null && String(rawMes).trim() !== '') {
     const dm = parseDiasMesRaw(rawMes);
     if (dm.length) {

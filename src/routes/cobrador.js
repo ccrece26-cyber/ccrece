@@ -467,7 +467,6 @@ async function resolverPrestamoIdEnNube(
 /**
  * Tras renovación el teléfono puede conservar el UUID del crédito viejo (Pagado).
  * Los cobros normales deben ir al crédito Activo del mismo cliente.
- * También contempla ficha /2 (misma cédula base, otro cliente_id).
  */
 async function redirigirPrestamoActivoSiCerrado(conn, prestamoId, { idMapPrestamos, localId } = {}) {
   const [rows] = await conn.execute(
@@ -479,51 +478,15 @@ async function redirigirPrestamoActivoSiCerrado(conn, prestamoId, { idMapPrestam
   const p = rows[0];
   const cerrado = p.estado === 'Pagado' || Number(p.saldo_pendiente) <= 0.01;
   if (!cerrado) return prestamoId;
-
   const [activo] = await conn.execute(
     `SELECT id FROM Prestamos
      WHERE cliente_id = ? AND estado = 'Activo' AND deleted_at IS NULL AND id != ?
      ORDER BY fecha_desembolso DESC LIMIT 1`,
     [p.cliente_id, prestamoId]
   );
-  if (activo.length) {
-    if (idMapPrestamos && localId) idMapPrestamos[localId] = activo[0].id;
-    return activo[0].id;
-  }
-
-  // Misma persona en ficha /2 (u original): cédula base sin sufijo /2
-  const [cli] = await conn.execute(
-    `SELECT id, cedula, cobrador_id FROM Clientes WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
-    [p.cliente_id]
-  );
-  if (cli.length && cli[0].cedula) {
-    const raw = String(cli[0].cedula).trim();
-    const base = raw.replace(/\/2$/i, '');
-    const alt = raw.toUpperCase().endsWith('/2') ? base : `${base}/2`;
-    const [hermanos] = await conn.execute(
-      `SELECT c.id FROM Clientes c
-       WHERE c.deleted_at IS NULL
-         AND c.id != ?
-         AND (c.cedula = ? OR c.cedula = ?)
-         AND (? IS NULL OR c.cobrador_id = ? OR c.cobrador_id IS NULL)
-       LIMIT 5`,
-      [p.cliente_id, base, alt, cli[0].cobrador_id, cli[0].cobrador_id]
-    );
-    for (const h of hermanos) {
-      const [actH] = await conn.execute(
-        `SELECT id FROM Prestamos
-         WHERE cliente_id = ? AND estado = 'Activo' AND deleted_at IS NULL
-         ORDER BY fecha_desembolso DESC LIMIT 1`,
-        [h.id]
-      );
-      if (actH.length) {
-        if (idMapPrestamos && localId) idMapPrestamos[localId] = actH[0].id;
-        return actH[0].id;
-      }
-    }
-  }
-
-  return prestamoId;
+  if (!activo.length) return prestamoId;
+  if (idMapPrestamos && localId) idMapPrestamos[localId] = activo[0].id;
+  return activo[0].id;
 }
 
 function esPagoRenovacionPreliminar(p) {

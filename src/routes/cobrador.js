@@ -686,6 +686,16 @@ async function pushSync(req, res) {
 
     for (const p of prestamosCerrados) {
       try {
+        const est = String(p.estado || '');
+        const esCierreRenov = /renov/i.test(est);
+        // No forzar Pagado/saldo 0 si en el mismo push viene el cobro: el pago debe aplicar primero.
+        if (
+          !esCierreRenov &&
+          prestamoIdsConPagos.has(p.id) &&
+          (est === 'Pagado' || est === 'Liquidado')
+        ) {
+          continue;
+        }
         await conn.execute(
           `UPDATE Prestamos SET estado = ?, saldo_pendiente = 0, is_synced = 1, updated_at = NOW() WHERE id = ?`,
           [p.estado || 'Cerrado por Renovación', p.id]

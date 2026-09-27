@@ -30,15 +30,38 @@ function fechaEnZona(date = new Date()) {
   return fechaNicaraguaManual(date);
 }
 
+/** MySQL DATE → JS Date suele ser medianoche UTC; no aplicar TZ o se corre un día. */
+function esFechaSoloMedianocheUtc(date) {
+  return (
+    date instanceof Date &&
+    !Number.isNaN(date.getTime()) &&
+    date.getUTCHours() === 0 &&
+    date.getUTCMinutes() === 0 &&
+    date.getUTCSeconds() === 0 &&
+    date.getUTCMilliseconds() === 0
+  );
+}
+
+function fechaCalendarioUtc(date) {
+  const y = date.getUTCFullYear();
+  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(date.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 function toFechaISO(valor) {
   if (typeof valor === 'function') return toFechaISO(valor());
-  if (valor instanceof Date) return fechaEnZona(valor);
+  if (valor instanceof Date) {
+    return esFechaSoloMedianocheUtc(valor) ? fechaCalendarioUtc(valor) : fechaEnZona(valor);
+  }
   if (valor == null || valor === '') return hoyISO();
   const s = String(valor).trim();
   const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
   if (m) return m[1];
   const d = new Date(s.includes('T') ? s : `${s}T12:00:00`);
-  if (!Number.isNaN(d.getTime())) return fechaEnZona(d);
+  if (!Number.isNaN(d.getTime())) {
+    return esFechaSoloMedianocheUtc(d) ? fechaCalendarioUtc(d) : fechaEnZona(d);
+  }
   return hoyISO();
 }
 

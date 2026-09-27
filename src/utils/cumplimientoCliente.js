@@ -84,7 +84,7 @@ function situacionPrestamoActivo(prestamo, pagosActivo) {
 
   const atrasadas = visitas.filter((v) => v.estado === 'atrasada');
   const hoyVisitas = visitas.filter((v) => v.estado === 'hoy');
-  const proximas = visitas.filter((v) => v.estado === 'futura').slice(0, 14);
+  const proximas = visitas.filter((v) => v.estado === 'futura');
   const visitasRestantesEst =
     cuotaVisita > 0.009 ? Math.ceil(saldo / cuotaVisita) : null;
 

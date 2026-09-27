@@ -92,15 +92,22 @@ const fechaAISO = (fecha) => {
 
 const generarAgendaSemanal = (inicioStr, inicio, plazo, dias, cuotaPorDia) => {
   const agenda = [];
-  for (let semana = 0; semana < plazo; semana += 1) {
-    for (const nombreDia of dias) {
+  const diasNorm = Array.isArray(dias) && dias.length ? dias : ['LUNES'];
+  const objetivo = Math.max(1, plazo) * diasNorm.length;
+  // Si el día de desembolso coincide con cobro, se omite y se prolonga 1 semana.
+  const maxSemanas = plazo + diasNorm.length + 2;
+  const seen = new Set();
+  for (let semana = 0; agenda.length < objetivo && semana < maxSemanas; semana += 1) {
+    for (const nombreDia of diasNorm) {
+      if (agenda.length >= objetivo) break;
       const targetDay = diaSemanaIndice(nombreDia);
       const fecha = new Date(inicio.getTime());
       fecha.setDate(inicio.getDate() + semana * 7);
       const delta = (targetDay - fecha.getDay() + 7) % 7;
       fecha.setDate(fecha.getDate() + delta);
       const fechaISO = fechaAISO(fecha);
-      if (!fechaISO || fechaISO === inicioStr) continue;
+      if (!fechaISO || fechaISO === inicioStr || seen.has(fechaISO)) continue;
+      seen.add(fechaISO);
       agenda.push({
         fecha_programada: fechaISO,
         monto_programado: cuotaPorDia,

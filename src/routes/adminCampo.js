@@ -279,17 +279,20 @@ async function getBuscarClientesCampo(req, res) {
       rows = await query(
         `SELECT c.id AS cliente_id, c.nombre_completo, c.telefono, c.direccion, c.cedula,
                 c.latitud, c.longitud, COALESCE(rc.orden_visita, 999) AS orden_visita,
-                u.nombre_completo AS cobrador_asignado,
+                u.nombre_completo AS cobrador_asignado, c.cobrador_id AS cobrador_asignado_id,
                 p.id AS prestamo_id, p.saldo_pendiente, p.cuota_semanal_base, p.dias_de_cobro,
                 p.monto_total_pagar, p.estado AS estado_prestamo, p.fecha_desembolso,
                 p.plazo_semanas, p.periodicidad
          FROM Clientes c
-         INNER JOIN Prestamos p ON p.cliente_id = c.id AND p.estado = 'Activo' AND p.deleted_at IS NULL
+         INNER JOIN Prestamos p ON p.cliente_id = c.id
+           AND LOWER(TRIM(p.estado)) = 'activo'
+           AND p.saldo_pendiente > 0.01
+           AND p.deleted_at IS NULL
          INNER JOIN Ruta_Clientes rc ON c.id = rc.cliente_id
          INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1 AND r.deleted_at IS NULL
          LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
          WHERE c.deleted_at IS NULL
-         ORDER BY c.nombre_completo ASC
+         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC
          LIMIT 200`,
         [adminId]
       );
@@ -297,15 +300,18 @@ async function getBuscarClientesCampo(req, res) {
       rows = await query(
         `SELECT c.id AS cliente_id, c.nombre_completo, c.telefono, c.direccion, c.cedula,
                 c.latitud, c.longitud, 999 AS orden_visita,
-                u.nombre_completo AS cobrador_asignado,
+                u.nombre_completo AS cobrador_asignado, c.cobrador_id AS cobrador_asignado_id,
                 p.id AS prestamo_id, p.saldo_pendiente, p.cuota_semanal_base, p.dias_de_cobro,
                 p.monto_total_pagar, p.estado AS estado_prestamo, p.fecha_desembolso,
                 p.plazo_semanas, p.periodicidad
          FROM Clientes c
-         INNER JOIN Prestamos p ON p.cliente_id = c.id AND p.estado = 'Activo' AND p.deleted_at IS NULL
+         INNER JOIN Prestamos p ON p.cliente_id = c.id
+           AND LOWER(TRIM(p.estado)) = 'activo'
+           AND p.saldo_pendiente > 0.01
+           AND p.deleted_at IS NULL
          LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
          WHERE c.deleted_at IS NULL
-         ORDER BY c.nombre_completo ASC
+         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC
          LIMIT 400`
       );
     }
@@ -317,9 +323,12 @@ async function getBuscarClientesCampo(req, res) {
     );
     const yaCobrados = new Set(cobradosHoy.map((r) => r.prestamo_id));
 
+    const vistosCliente = new Set();
     const fuera = [];
     for (const row of rows || []) {
       if (yaCobrados.has(row.prestamo_id)) continue;
+      // Un solo crédito activo con saldo por cliente (el más reciente).
+      if (vistosCliente.has(row.cliente_id)) continue;
       const tocaHoy = debeIncluirEnAgenda(hoy, {
         fecha_desembolso: row.fecha_desembolso,
         dias_de_cobro: row.dias_de_cobro,
@@ -346,6 +355,7 @@ async function getBuscarClientesCampo(req, res) {
       const montoRaw = montoVisitaHoy(row.cuota_semanal_base, row.dias_de_cobro, {
         periodicidad: row.periodicidad,
       });
+      vistosCliente.add(row.cliente_id);
       fuera.push({
         cliente_id: row.cliente_id,
         codigo_cliente: row.cliente_id,
@@ -357,6 +367,7 @@ async function getBuscarClientesCampo(req, res) {
         longitud: row.longitud != null ? Number(row.longitud) : null,
         orden_visita: row.orden_visita,
         cobrador_asignado: row.cobrador_asignado || null,
+        cobrador_asignado_id: row.cobrador_asignado_id || null,
         prestamo_id: row.prestamo_id,
         estado_prestamo: row.estado_prestamo,
         saldo_pendiente: Number(row.saldo_pendiente),

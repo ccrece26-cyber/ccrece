@@ -324,6 +324,18 @@ async function rutaDiaria(req, res) {
       );
     }
 
+    let visitas_adicionales = [];
+    try {
+      visitas_adicionales = await query(
+        `SELECT id, cobrador_id, prestamo_id, cliente_id, fecha
+         FROM Visitas_Adicionales_Dia
+         WHERE cobrador_id = ? AND fecha = ? AND deleted_at IS NULL`,
+        [cobradorId, hoy]
+      );
+    } catch {
+      visitas_adicionales = [];
+    }
+
     return res.json({
       success: true,
       serverTime: new Date().toISOString(),
@@ -343,6 +355,7 @@ async function rutaDiaria(req, res) {
         pagos_hoy,
         gestiones_hoy,
         pagos_anulados_hoy,
+        visitas_adicionales,
       },
     });
   } catch (e) {
@@ -543,6 +556,7 @@ async function pushSync(req, res) {
     renovaciones: [],
     solicitudes_correccion: [],
     cierres: [],
+    visitas_adicionales: [],
   };
   const idMapFiadores = {};
   const fiadorIdPorPrestamo = {};
@@ -563,6 +577,7 @@ async function pushSync(req, res) {
       renovaciones = [],
       cobradorId,
       cierres = [],
+      visitas_adicionales = [],
     } = req.body;
 
     await exigirUsuarioActivo(cobradorId || req.operadorId, conn);
@@ -1455,6 +1470,39 @@ async function pushSync(req, res) {
       }
     }
 
+    for (const va of visitas_adicionales) {
+      try {
+        if (!va?.id || !va.prestamo_id) continue;
+        const cobId = va.cobrador_id || cobradorId;
+        const fechaVa = String(va.fecha || hoySync).slice(0, 10);
+        const [ex] = await conn.execute(
+          `SELECT id FROM Visitas_Adicionales_Dia
+           WHERE cobrador_id = ? AND prestamo_id = ? AND fecha = ? AND deleted_at IS NULL
+           LIMIT 1`,
+          [cobId, va.prestamo_id, fechaVa]
+        );
+        if (ex.length) {
+          synced.visitas_adicionales.push(va.id);
+          continue;
+        }
+        await conn.execute(
+          `INSERT INTO Visitas_Adicionales_Dia
+            (id, cobrador_id, prestamo_id, cliente_id, fecha, is_synced)
+           VALUES (?, ?, ?, ?, ?, 1)
+           ON DUPLICATE KEY UPDATE
+             deleted_at = NULL,
+             cliente_id = COALESCE(VALUES(cliente_id), cliente_id),
+             is_synced = 1,
+             updated_at = CURRENT_TIMESTAMP`,
+          [va.id, cobId, va.prestamo_id, va.cliente_id || null, fechaVa]
+        );
+        synced.visitas_adicionales.push(va.id);
+        procesados++;
+      } catch (err) {
+        pushErr(errores, 'visita_adicional', va?.id, err.message);
+      }
+    }
+
     for (const s of req.body.solicitudes_correccion || []) {
       try {
         const [ex] = await conn.execute(
@@ -2322,6 +2370,33 @@ async function renovacionCobrador(req, res) {
   }
 }
 
+async function registrarVisitaAdicional(req, res) {
+  try {
+    const cobradorId = req.body?.cobrador_id || req.operadorId;
+    const prestamoId = req.body?.prestamo_id;
+    const clienteId = req.body?.cliente_id || null;
+    const fecha = String(req.body?.fecha || fechaCalendarioISO()).slice(0, 10);
+    const id = req.body?.id || require('crypto').randomUUID();
+    if (!cobradorId || !prestamoId) {
+      return res.status(400).json({ success: false, message: 'cobrador_id y prestamo_id requeridos' });
+    }
+    await query(
+      `INSERT INTO Visitas_Adicionales_Dia
+        (id, cobrador_id, prestamo_id, cliente_id, fecha, is_synced)
+       VALUES (?, ?, ?, ?, ?, 1)
+       ON DUPLICATE KEY UPDATE
+         deleted_at = NULL,
+         cliente_id = COALESCE(VALUES(cliente_id), cliente_id),
+         is_synced = 1,
+         updated_at = CURRENT_TIMESTAMP`,
+      [id, cobradorId, prestamoId, clienteId, fecha]
+    );
+    return res.json({ success: true, id, cobrador_id: cobradorId, prestamo_id: prestamoId, fecha });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
 module.exports = {
   rutaDiaria,
   clientesGps,
@@ -2339,4 +2414,5 @@ module.exports = {
   historialPrestamosCliente,
   cumplimientoCliente,
   renovacionCobrador,
+  registrarVisitaAdicional,
 };

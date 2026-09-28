@@ -38,6 +38,17 @@ function esVisitaCobrada(estado) {
   return estado === 'cobrado' || estado === 'cobrado_admin';
 }
 
+/** Solo visitas del día de cobro + extras + ya gestionadas (cobro / no pago). */
+function filtrarAgendaCumplimientoDia(agenda = []) {
+  return (agenda || []).filter(
+    (v) =>
+      v.toca_hoy ||
+      v.adicional_dia ||
+      esVisitaCobrada(v.estado_visita) ||
+      v.estado_visita === 'no_pago'
+  );
+}
+
 function montoSugeridoVisita(prestamo) {
   const raw = montoVisitaHoy(prestamo?.cuota_semanal_base, prestamo?.dias_de_cobro, {
     periodicidad: prestamo?.periodicidad,
@@ -52,12 +63,16 @@ function armarAgendaDesdeDatos(
   cuotas,
   pagos_hoy,
   gestiones_hoy,
-  cobradorId = null
+  cobradorId = null,
+  adicionalesPrestamoIds = null
 ) {
   const pagosRuta = pagos_hoy;
   const gestionesRuta = cobradorId
     ? gestiones_hoy.filter((g) => g.cobrador_id === cobradorId)
     : gestiones_hoy;
+  const extras = adicionalesPrestamoIds instanceof Set
+    ? adicionalesPrestamoIds
+    : new Set(adicionalesPrestamoIds || []);
 
   const agenda = [];
   const pagoPorPrestamo = new Map(pagosRuta.map((pg) => [pg.prestamo_id, pg]));
@@ -126,6 +141,7 @@ function armarAgendaDesdeDatos(
       cuota_semanal_base: p.cuota_semanal_base,
       dias_de_cobro: p.dias_de_cobro,
       toca_hoy: tocaHoy,
+      adicional_dia: !!extra.adicional_dia,
       fuera_de_dia: !tocaHoy,
       tipo_visita,
       estado_visita,
@@ -149,12 +165,18 @@ function armarAgendaDesdeDatos(
     });
   };
 
-  // Modelo flexible: toda la cartera activa de la ruta; días solo priorizan/sugieren.
+  // Modelo flexible: cartera activa; días + extras del día priorizan cumplimiento.
   for (const c of clientes) {
     const p = prestamos.find((x) => x.cliente_id === c.id && x.estado === 'Activo');
     if (!p) continue;
-    const tocaHoy = debeIncluirEnAgenda(hoy, p);
-    pushAgendaItem(c, p, { toca_hoy: tocaHoy });
+    const tocaNatural = debeIncluirEnAgenda(hoy, p);
+    const esAdicional = extras.has(p.id);
+    const tocaHoy = tocaNatural || esAdicional;
+    pushAgendaItem(c, p, {
+      toca_hoy: tocaHoy,
+      adicional_dia: esAdicional,
+      etiqueta_visita: !tocaNatural && esAdicional ? 'Extra del día' : undefined,
+    });
 
     for (const pg of pagosRuta.filter((x) => x.cliente_id === c.id)) {
       if (prestamosEnAgenda.has(pg.prestamo_id)) continue;
@@ -184,18 +206,20 @@ function armarAgendaDesdeDatos(
 
   const agendaConTiempos = anotarTiemposVisitas(agenda);
   const tiempos = resumenTiemposRuta(agendaConTiempos);
+  const agendaDia = filtrarAgendaCumplimientoDia(agendaConTiempos);
 
-  const cobrado = agendaConTiempos.filter((v) => esVisitaCobrada(v.estado_visita)).length;
-  const liquidado = agendaConTiempos.filter((v) => v.tipo_visita === 'liquidado').length;
-  const no_pago = agendaConTiempos.filter((v) => v.estado_visita === 'no_pago').length;
-  const pendiente = agendaConTiempos.filter((v) => v.estado_visita === 'pendiente').length;
-  const sugeridos_hoy = agendaConTiempos.filter((v) => v.toca_hoy && v.estado_visita === 'pendiente').length;
-  const total = agendaConTiempos.length;
+  const cobrado = agendaDia.filter((v) => esVisitaCobrada(v.estado_visita)).length;
+  const liquidado = agendaDia.filter((v) => v.tipo_visita === 'liquidado').length;
+  const no_pago = agendaDia.filter((v) => v.estado_visita === 'no_pago').length;
+  const pendiente = agendaDia.filter((v) => v.estado_visita === 'pendiente').length;
+  const sugeridos_hoy = agendaDia.filter((v) => v.toca_hoy && v.estado_visita === 'pendiente').length;
+  const total = agendaDia.length;
   const visitadas = cobrado + no_pago;
   const monto_cobrado = pagosRuta.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
 
   return {
     agenda: agendaConTiempos,
+    agenda_dia: agendaDia,
     resumen: {
       total_visitas: total,
       cobrado,
@@ -206,7 +230,7 @@ function armarAgendaDesdeDatos(
       visitadas,
       porcentaje: total ? Math.round((visitadas / total) * 100) : 0,
       monto_cobrado,
-      gps: resumenGpsAgenda(agendaConTiempos),
+      gps: resumenGpsAgenda(agendaDia),
       tiempos,
     },
     pagos_hoy: pagosRuta,
@@ -306,7 +330,16 @@ async function cargarDatosCobrador(query, cobradorId, fechaISO) {
 async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
   const hoy = fechaISO || fechaCalendarioISO();
   if (!cobradorIds.length) {
-    return { hoy, clientes: [], prestamos: [], cuotas: [], pagos_hoy: [], gestiones_hoy: [], cierres: [] };
+    return {
+      hoy,
+      clientes: [],
+      prestamos: [],
+      cuotas: [],
+      pagos_hoy: [],
+      gestiones_hoy: [],
+      cierres: [],
+      visitas_adicionales: [],
+    };
   }
 
   const ph = cobradorIds.map(() => '?').join(',');
@@ -395,11 +428,34 @@ async function cargarDatosTodosCobradores(query, cobradorIds, fechaISO) {
     [...cobradorIds, hoy]
   );
 
-  return { hoy, clientes, prestamos, cuotas, pagos_hoy, gestiones_hoy, cierres };
+  let visitas_adicionales = [];
+  try {
+    visitas_adicionales = await query(
+      `SELECT id, cobrador_id, prestamo_id, cliente_id, fecha
+       FROM Visitas_Adicionales_Dia
+       WHERE cobrador_id IN (${ph}) AND fecha = ? AND deleted_at IS NULL`,
+      [...cobradorIds, hoy]
+    );
+  } catch {
+    visitas_adicionales = [];
+  }
+
+  return { hoy, clientes, prestamos, cuotas, pagos_hoy, gestiones_hoy, cierres, visitas_adicionales };
 }
 
 async function buildAgendaCobrador(query, cobradorId, fechaISO) {
   const datos = await cargarDatosCobrador(query, cobradorId, fechaISO);
+  let extras = new Set();
+  try {
+    const rows = await query(
+      `SELECT prestamo_id FROM Visitas_Adicionales_Dia
+       WHERE cobrador_id = ? AND fecha = ? AND deleted_at IS NULL`,
+      [cobradorId, datos.hoy]
+    );
+    extras = new Set((rows || []).map((r) => r.prestamo_id).filter(Boolean));
+  } catch {
+    extras = new Set();
+  }
   const armado = armarAgendaDesdeDatos(
     datos.hoy,
     datos.clientes,
@@ -407,14 +463,15 @@ async function buildAgendaCobrador(query, cobradorId, fechaISO) {
     datos.cuotas,
     datos.pagos_hoy,
     datos.gestiones_hoy,
-    cobradorId
+    cobradorId,
+    extras
   );
   const pagosCaja = datos.pagos_caja || datos.pagos_hoy.filter((p) => p.cobrador_id === cobradorId);
   const montoCaja = pagosCaja.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
   return {
     dia_cobro: diaCobroDeFecha(datos.hoy),
     fecha: datos.hoy,
-    agenda: armado.agenda,
+    agenda: armado.agenda_dia || armado.agenda,
     resumen: {
       ...armado.resumen,
       monto_cobrado: montoCaja,
@@ -458,6 +515,13 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       return pr && clienteIds.has(pr.cliente_id);
     });
 
+    const extrasCob = new Set(
+      (datos.visitas_adicionales || [])
+        .filter((v) => v.cobrador_id === cob.id)
+        .map((v) => v.prestamo_id)
+        .filter(Boolean)
+    );
+
     const armado = armarAgendaDesdeDatos(
       datos.hoy,
       clientesCob,
@@ -465,7 +529,8 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       datos.cuotas,
       pagosRuta,
       gestMerged,
-      cob.id
+      cob.id,
+      extrasCob
     );
 
     const montoCobradoReal = pagosCaja.reduce((s, p) => s + Number(p.monto_pagado || 0), 0);
@@ -480,7 +545,7 @@ async function buildCumplimientoBatch(query, cobradores, fechaISO, { incluirVisi
       monto_cobrado: montoCobradoReal,
       cobros_registrados: cobrosRegistrados,
       cierre_caja: cierreMap.get(cob.id) || null,
-      visitas: incluirVisitas ? armado.agenda : [],
+      visitas: incluirVisitas ? armado.agenda_dia || armado.agenda : [],
     });
   }
 

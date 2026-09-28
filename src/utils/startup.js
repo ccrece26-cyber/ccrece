@@ -113,6 +113,20 @@ async function migrarTablasSync() {
       KEY idx_castigo_prestamo (prestamo_id),
       KEY idx_castigo_cliente (cliente_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
+    `CREATE TABLE IF NOT EXISTS Visitas_Adicionales_Dia (
+      id VARCHAR(36) NOT NULL PRIMARY KEY,
+      cobrador_id VARCHAR(36) NOT NULL,
+      prestamo_id VARCHAR(36) NOT NULL,
+      cliente_id VARCHAR(36) DEFAULT NULL,
+      fecha DATE NOT NULL,
+      is_synced TINYINT(1) DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      deleted_at DATETIME DEFAULT NULL,
+      UNIQUE KEY uq_visita_extra_dia (cobrador_id, prestamo_id, fecha),
+      KEY idx_visita_extra_fecha (fecha, cobrador_id),
+      KEY idx_visita_extra_prestamo (prestamo_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
   ];
   for (const sql of alters) {
     try {

@@ -774,7 +774,17 @@ async function crearPrestamo(req, res) {
     const operadorId = p.operador?.id || p.cobrador_registro_id || null;
     const id = p.id || uuidv4();
     const { resolverFechaOperacion } = require('../utils/fechaOperacion');
+    const { resolverFrecuenciaCobro } = require('../utils/frecuenciaCobro');
     const fechaOp = resolverFechaOperacion(p.fecha_desembolso, { permitirPasado: true });
+    const freqResolved = resolverFrecuenciaCobro({
+      dias_de_cobro: p.dias_de_cobro,
+      tipo_frecuencia: p.tipo_frecuencia || p.periodicidad,
+      dias_mes: p.dias_mes,
+      periodicidad: p.periodicidad,
+    });
+    const diasJson = JSON.stringify(freqResolved.dias?.length ? freqResolved.dias : ['LUNES']);
+    const freqSemana = Math.max(1, Number(p.frecuencia_semana) || freqResolved.dias?.length || 1);
+    const recibo = txt(p.numero_recibo_fisico);
     await conn.beginTransaction();
 
     let fiadorId = p.fiador_id || null;
@@ -802,8 +812,8 @@ async function crearPrestamo(req, res) {
         monto_desembolsado, plazo_semanas, tasa_interes_aplicada,
         cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana,
         dias_de_cobro, periodicidad, estado, fecha_desembolso,
-        cobrador_registro_id, cobrador_entrega_id, is_synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', 'Activo', ?, ?, ?, 1)`,
+        numero_recibo_fisico, cobrador_registro_id, cobrador_entrega_id, is_synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo', ?, ?, ?, ?, 1)`,
       [
         id,
         p.cliente_id,
@@ -814,20 +824,26 @@ async function crearPrestamo(req, res) {
         p.cuota_semanal_base,
         p.monto_total_pagar,
         p.saldo_pendiente,
-        p.frecuencia_semana || 1,
-        typeof p.dias_de_cobro === 'string' ? p.dias_de_cobro : JSON.stringify(p.dias_de_cobro || ['LUNES']),
+        freqSemana,
+        diasJson,
+        freqResolved.periodicidad || 'SEMANAL',
         fechaOp.dia,
+        recibo,
         operadorId,
         p.cobrador_entrega_id || null,
       ]
     );
     // Modelo flexible: no se insertan cuotas de calendario al crear préstamo.
     const [cliRows] = await conn.execute(
-      'SELECT nombre_completo, telefono FROM Clientes WHERE id = ? LIMIT 1',
+      'SELECT nombre_completo, telefono, cobrador_id FROM Clientes WHERE id = ? LIMIT 1',
       [p.cliente_id]
     );
     await conn.commit();
-    await afterCarteraMutation(conn);
+    await afterCarteraMutation(conn, [
+      cliRows[0]?.cobrador_id,
+      operadorId,
+      p.cobrador_entrega_id,
+    ].filter(Boolean));
     return res.json({
       success: true,
       id,

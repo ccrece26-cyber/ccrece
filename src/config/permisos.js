@@ -1,9 +1,8 @@
 const PERMISOS_DEFAULT = {
   ADMIN: ['*'],
-  /** Casi admin: sin configurar permisos ni respaldo SQL. */
+  /** Supervisa cartera/cobros; sin usuarios, carga masiva, integridad, permisos ni respaldo. */
   SUPERVISOR: [
     'cuenta',
-    'cobradores',
     'clientes',
     'rutas',
     'cumplimiento',
@@ -51,6 +50,8 @@ const LABELS = {
   cuenta: 'Mi cuenta',
   campo: 'Modo campo',
   respaldo: 'Respaldo SQL',
+  carga_masiva: 'Carga masiva',
+  integridad: 'Integridad de saldos',
 };
 
 module.exports = { PERMISOS_DEFAULT, LABELS };

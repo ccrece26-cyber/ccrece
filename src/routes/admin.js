@@ -18,6 +18,18 @@ async function rolDelOperador(req) {
   );
   return rows[0]?.rol || null;
 }
+
+async function exigirSoloAdminDueno(req, res, mensaje) {
+  const rol = await rolDelOperador(req);
+  if (!esAdminDueno(rol)) {
+    res.status(403).json({
+      success: false,
+      message: mensaje || 'Solo el administrador puede realizar esta acción.',
+    });
+    return false;
+  }
+  return true;
+}
 const { nextClienteId, initSecuenciaCliente, esIdClienteOficial } = require('../utils/clienteId');
 const { upsertFiadorEnNube, vincularFiadorAPrestamo } = require('../utils/fiadoresNube');
 const {
@@ -409,12 +421,17 @@ async function setPermisos(req, res) {
       return res.status(400).json({ success: false, message: 'Permisos COBRADOR y CONTADOR requeridos.' });
     }
     permisos.ADMIN = ['*'];
-    if (!permisos.SUPERVISOR) {
-      permisos.SUPERVISOR = PERMISOS_DEFAULT.SUPERVISOR;
-    }
-    // Supervisor nunca configura permisos ni respaldo
-    permisos.SUPERVISOR = (permisos.SUPERVISOR || []).filter(
-      (p) => p !== 'permisos' && p !== 'respaldo' && p !== '*'
+    // Supervisor: sin usuarios, carga masiva, integridad, permisos ni respaldo
+    const bloqueadosSup = new Set([
+      'permisos',
+      'respaldo',
+      'cobradores',
+      'carga_masiva',
+      'integridad',
+      '*',
+    ]);
+    permisos.SUPERVISOR = (permisos.SUPERVISOR || PERMISOS_DEFAULT.SUPERVISOR).filter(
+      (p) => !bloqueadosSup.has(p)
     );
     await query(
       `INSERT INTO Parametros_Globales (id, clave, valor, descripcion, is_synced)
@@ -585,6 +602,7 @@ async function listContadores(req, res) {
 
 async function createContador(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
     const nombre_completo = String(req.body.nombre_completo || '').trim();
     const email = String(req.body.email || '').toLowerCase().trim();
     const password = String(req.body.password || '').trim();
@@ -614,6 +632,7 @@ async function createContador(req, res) {
 
 async function createCobrador(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
     const nombre_completo = String(req.body.nombre_completo || '').trim();
     const email = String(req.body.email || '').toLowerCase().trim();
     const password = String(req.body.password || '').trim();
@@ -654,6 +673,7 @@ async function createCobrador(req, res) {
 
 async function updateCobrador(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
     const { id } = req.params;
     const nombre_completo = String(req.body.nombre_completo || '').trim();
     const email = String(req.body.email || '').toLowerCase().trim();
@@ -704,6 +724,7 @@ async function updateCobrador(req, res) {
 
 async function updateContador(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
     const { id } = req.params;
     const nombre_completo = String(req.body.nombre_completo || '').trim();
     const email = String(req.body.email || '').toLowerCase().trim();
@@ -1747,6 +1768,7 @@ async function getReporte(req, res) {
 
 async function resetPasswordUsuario(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede restablecer contraseñas.'))) return;
     const { id } = req.params;
     const custom = String(req.body.password || '').trim();
     const password = custom || crypto.randomBytes(4).toString('hex');
@@ -2011,6 +2033,7 @@ async function cerrarCierreCajaDia(req, res) {
 
 async function validarCargaMasiva(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede usar carga masiva.'))) return;
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
     if (!filas.length) {
       return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
@@ -2027,6 +2050,7 @@ async function validarCargaMasiva(req, res) {
 
 async function importarCargaMasiva(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede usar carga masiva.'))) return;
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
     if (!filas.length) {
       return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
@@ -2046,6 +2070,7 @@ async function importarCargaMasiva(req, res) {
 
 async function validarCargaMasivaGarantias(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede usar carga masiva.'))) return;
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
     if (!filas.length) {
       return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
@@ -2062,6 +2087,7 @@ async function validarCargaMasivaGarantias(req, res) {
 
 async function getAuditoriaIntegridad(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede ver integridad de saldos.'))) return;
     const data = await runAuditoriaIntegridad();
     return res.json({ success: true, data });
   } catch (e) {
@@ -2071,6 +2097,7 @@ async function getAuditoriaIntegridad(req, res) {
 
 async function importarCargaMasivaGarantias(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede usar carga masiva.'))) return;
     const filas = Array.isArray(req.body?.filas) ? req.body.filas : [];
     if (!filas.length) {
       return res.status(400).json({ success: false, message: 'Envie un arreglo "filas" con al menos una fila.' });
@@ -2271,6 +2298,7 @@ async function castigarPerdida(req, res) {
 
 async function exportCarteraImportacion(req, res) {
   try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede exportar cartera para reimportación.'))) return;
     const cartera = await query(
       `SELECT c.cedula,
               c.primer_nombre, c.segundo_nombre, c.primer_apellido, c.segundo_apellido,

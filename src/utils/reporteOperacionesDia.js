@@ -7,12 +7,6 @@ const { query } = require('../config/db');
 const { rangoDiaLocal } = require('./fechasSql');
 const { toFechaISO, ZONA_NICARAGUA } = require('./zonaHoraria');
 
-const COB_LABEL = {
-  'COB-mq879bqw': 'Vielka',
-  'COB-mq879qxc': 'Álvaro',
-  'USER-ADMIN-1': 'J.Carlos',
-};
-
 const num = (n) => {
   const x = Number(String(n ?? 0).replace(/,/g, ''));
   return Number.isFinite(x) ? x : 0;
@@ -30,11 +24,9 @@ const fmtHora = (v) => {
   });
 };
 
-const labelCobrador = (nombre, id) => {
-  if (id && COB_LABEL[id]) return COB_LABEL[id];
-  const n = String(nombre || '');
-  if (/cobrador\s*2/i.test(n)) return 'Álvaro';
-  if (/vielka/i.test(n)) return 'Vielka';
+/** Nombre real desde Usuarios (sin alias fijos tipo Vielka). */
+const labelCobrador = (nombre) => {
+  const n = String(nombre || '').trim();
   return n || '—';
 };
 
@@ -380,5 +372,4 @@ module.exports = {
   labelCobrador,
   fmtHora,
   num,
-  COB_LABEL,
 };

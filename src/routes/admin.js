@@ -782,8 +782,18 @@ async function crearPrestamo(req, res) {
       dias_mes: p.dias_mes,
       periodicidad: p.periodicidad,
     });
-    const diasJson = JSON.stringify(freqResolved.dias?.length ? freqResolved.dias : ['LUNES']);
-    const freqSemana = Math.max(1, Number(p.frecuencia_semana) || freqResolved.dias?.length || 1);
+    const diasAgenda = freqResolved.diasParaAgenda || freqResolved.diasSemana || [];
+    const diasJson = JSON.stringify(
+      diasAgenda.length
+        ? freqResolved.tipo === 'DIAS_MES'
+          ? diasAgenda.map((d) => Number(d))
+          : diasAgenda.map((d) => String(d).toUpperCase())
+        : ['LUNES']
+    );
+    const freqSemana = Math.max(
+      1,
+      Number(p.frecuencia_semana) || diasAgenda.length || 1
+    );
     const recibo = txt(p.numero_recibo_fisico);
     await conn.beginTransaction();
 

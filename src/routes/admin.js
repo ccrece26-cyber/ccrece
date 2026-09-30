@@ -1515,15 +1515,28 @@ async function getReporte(req, res) {
         const { inicio, fin } = rangoPeriodoLocal(desde, hasta);
         const filas = await query(
           `SELECT u.nombre_completo AS cobrador,
-                  COUNT(DISTINCT p.id) AS pagos,
-                  COALESCE(SUM(p.monto_pagado),0) AS monto_cobrado,
-                  COUNT(DISTINCT g.id) AS gestiones_no_pago
+                  COALESCE(pg.pagos, 0) AS pagos,
+                  COALESCE(pg.monto_cobrado, 0) AS monto_cobrado,
+                  COALESCE(gn.gestiones_no_pago, 0) AS gestiones_no_pago
            FROM Usuarios u
            JOIN Roles r ON u.rol_id = r.id
-           LEFT JOIN Pagos p ON p.cobrador_id = u.id AND p.deleted_at IS NULL AND p.fecha_pago >= ? AND p.fecha_pago < ?
-           LEFT JOIN Gestiones_No_Pago g ON g.cobrador_id = u.id AND g.fecha_gestion >= ? AND g.fecha_gestion < ?
+           LEFT JOIN (
+             SELECT cobrador_id,
+                    COUNT(*) AS pagos,
+                    COALESCE(SUM(monto_pagado), 0) AS monto_cobrado
+             FROM Pagos
+             WHERE deleted_at IS NULL
+               AND fecha_pago >= ? AND fecha_pago < ?
+             GROUP BY cobrador_id
+           ) pg ON pg.cobrador_id = u.id
+           LEFT JOIN (
+             SELECT cobrador_id, COUNT(*) AS gestiones_no_pago
+             FROM Gestiones_No_Pago
+             WHERE fecha_gestion >= ? AND fecha_gestion < ?
+             GROUP BY cobrador_id
+           ) gn ON gn.cobrador_id = u.id
            WHERE r.nombre = 'COBRADOR' AND u.deleted_at IS NULL
-           GROUP BY u.id, u.nombre_completo ORDER BY monto_cobrado DESC`,
+           ORDER BY monto_cobrado DESC`,
           [inicio, fin, inicio, fin]
         );
         return res.json({

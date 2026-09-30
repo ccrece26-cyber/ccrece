@@ -1,5 +1,20 @@
 const PERMISOS_DEFAULT = {
   ADMIN: ['*'],
+  /** Casi admin: sin configurar permisos ni respaldo SQL. */
+  SUPERVISOR: [
+    'cuenta',
+    'cobradores',
+    'clientes',
+    'rutas',
+    'cumplimiento',
+    'tasas',
+    'prestamos',
+    'abonos',
+    'renovaciones',
+    'reportes',
+    'prorrogas',
+    'campo',
+  ],
   COBRADOR: [
     'ruta',
     'clientes.ver',
@@ -29,6 +44,13 @@ const LABELS = {
   permisos: 'Configurar permisos',
   renovaciones: 'Aprobar renovaciones (admin)',
   prorrogas: 'Prorrogas',
+  cumplimiento: 'Cumplimiento de ruta',
+  tasas: 'Parametros financieros',
+  prestamos: 'Prestamos',
+  abonos: 'Abonos del dia',
+  cuenta: 'Mi cuenta',
+  campo: 'Modo campo',
+  respaldo: 'Respaldo SQL',
 };
 
 module.exports = { PERMISOS_DEFAULT, LABELS };

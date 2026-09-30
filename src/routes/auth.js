@@ -89,7 +89,7 @@ async function cambiarPassword(req, res) {
     }
 
     const usuario = rows[0];
-    const rolesPermitidos = ['ADMIN', 'COBRADOR', 'CONTADOR'];
+    const rolesPermitidos = ['ADMIN', 'SUPERVISOR', 'COBRADOR', 'CONTADOR'];
     if (!rolesPermitidos.includes(usuario.rol)) {
       return res.status(403).json({ success: false, message: 'Operación no permitida para este rol.' });
     }

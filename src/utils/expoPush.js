@@ -40,7 +40,7 @@ async function tokensAdminsActivos(query) {
     `SELECT u.id, u.expo_push_token AS token
      FROM Usuarios u
      INNER JOIN Roles r ON u.rol_id = r.id
-     WHERE r.nombre = 'ADMIN' AND u.activo = 1 AND u.deleted_at IS NULL
+     WHERE r.nombre IN ('ADMIN', 'SUPERVISOR') AND u.activo = 1 AND u.deleted_at IS NULL
        AND u.expo_push_token IS NOT NULL AND TRIM(u.expo_push_token) != ''`
   );
   return rows

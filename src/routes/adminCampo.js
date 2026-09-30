@@ -19,13 +19,13 @@ const {
 async function resolveAdmin(adminId) {
   if (!adminId) throw new Error('admin_id requerido');
   const rows = await query(
-    `SELECT u.id, u.nombre_completo FROM Usuarios u
+    `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
      JOIN Roles r ON u.rol_id = r.id
-     WHERE u.id = ? AND r.nombre = 'ADMIN' AND u.activo = 1 AND u.deleted_at IS NULL
+     WHERE u.id = ? AND r.nombre IN ('ADMIN', 'SUPERVISOR') AND u.activo = 1 AND u.deleted_at IS NULL
      LIMIT 1`,
     [adminId]
   );
-  if (!rows.length) throw new Error('Administrador no encontrado');
+  if (!rows.length) throw new Error('Administrador/supervisor no encontrado');
   return rows[0];
 }
 

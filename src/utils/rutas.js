@@ -127,7 +127,7 @@ async function sincronizarRutasCobradores() {
   const operadores = await query(
     `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
      JOIN Roles r ON u.rol_id = r.id
-     WHERE r.nombre IN ('COBRADOR', 'ADMIN') AND u.activo = 1 AND u.deleted_at IS NULL`
+     WHERE r.nombre IN ('COBRADOR', 'ADMIN', 'SUPERVISOR') AND u.activo = 1 AND u.deleted_at IS NULL`
   );
   let creadas = 0;
   for (const c of operadores) {
@@ -137,7 +137,9 @@ async function sincronizarRutasCobradores() {
     );
     if (!antes.length) {
       const desc =
-        c.rol === 'ADMIN' ? 'Ruta campo administrador — Esteli' : 'Ruta diaria automatica — Esteli';
+        c.rol === 'ADMIN' || c.rol === 'SUPERVISOR'
+          ? `Ruta campo ${c.rol === 'SUPERVISOR' ? 'supervisora' : 'administrador'} — Esteli`
+          : 'Ruta diaria automatica — Esteli';
       await ensureRutaForOperador(c.id, c.nombre_completo, desc);
       creadas++;
     }

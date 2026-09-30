@@ -4,6 +4,20 @@ const { v4: uuidv4 } = require('uuid');
 const { query, getConnection } = require('../config/db');
 const { nombreCompleto } = require('../utils/cliente');
 const { PERMISOS_DEFAULT, LABELS } = require('../config/permisos');
+const { esAdminDueno, esAdminOperativo } = require('../utils/roles');
+const { extraerOperadorId } = require('../utils/assertUsuarioActivo');
+
+async function rolDelOperador(req) {
+  const id = req.operadorId || extraerOperadorId(req);
+  if (!id) return null;
+  const rows = await query(
+    `SELECT r.nombre AS rol FROM Usuarios u
+     JOIN Roles r ON u.rol_id = r.id
+     WHERE u.id = ? AND u.deleted_at IS NULL LIMIT 1`,
+    [id]
+  );
+  return rows[0]?.rol || null;
+}
 const { nextClienteId, initSecuenciaCliente, esIdClienteOficial } = require('../utils/clienteId');
 const { upsertFiadorEnNube, vincularFiadorAPrestamo } = require('../utils/fiadoresNube');
 const {
@@ -77,6 +91,13 @@ const camposCliente = (c) => ({
 
 async function getRespaldoSql(req, res) {
   try {
+    const rol = await rolDelOperador(req);
+    if (!esAdminDueno(rol)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo el administrador puede exportar el respaldo SQL.',
+      });
+    }
     const { sql, meta } = await generarRespaldoSql();
     res.setHeader('Content-Type', 'application/sql; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${meta.filename}"`);
@@ -376,11 +397,25 @@ async function getPermisos(req, res) {
 
 async function setPermisos(req, res) {
   try {
+    const rolOp = await rolDelOperador(req);
+    if (!esAdminDueno(rolOp)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo el administrador puede cambiar permisos de roles.',
+      });
+    }
     const permisos = req.body.permisos || req.body;
     if (!permisos.COBRADOR || !permisos.CONTADOR) {
       return res.status(400).json({ success: false, message: 'Permisos COBRADOR y CONTADOR requeridos.' });
     }
     permisos.ADMIN = ['*'];
+    if (!permisos.SUPERVISOR) {
+      permisos.SUPERVISOR = PERMISOS_DEFAULT.SUPERVISOR;
+    }
+    // Supervisor nunca configura permisos ni respaldo
+    permisos.SUPERVISOR = (permisos.SUPERVISOR || []).filter(
+      (p) => p !== 'permisos' && p !== 'respaldo' && p !== '*'
+    );
     await query(
       `INSERT INTO Parametros_Globales (id, clave, valor, descripcion, is_synced)
        VALUES (?, 'PERMISOS_ROLES', ?, 'Permisos por rol', 1)
@@ -1760,14 +1795,14 @@ async function getCumplimientoRuta(req, res) {
       ? await query(
           `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
            JOIN Roles r ON u.rol_id = r.id
-           WHERE u.id = ? AND r.nombre IN ('COBRADOR', 'ADMIN') AND u.activo = 1`,
+           WHERE u.id = ? AND r.nombre IN ('COBRADOR', 'ADMIN', 'SUPERVISOR') AND u.activo = 1`,
           [cobradorId]
         )
       : await query(
           `SELECT u.id, u.nombre_completo, r.nombre AS rol FROM Usuarios u
            JOIN Roles r ON u.rol_id = r.id
-           WHERE r.nombre IN ('COBRADOR', 'ADMIN') AND u.activo = 1
-           ORDER BY CASE WHEN r.nombre = 'ADMIN' THEN 0 ELSE 1 END, u.nombre_completo`
+           WHERE r.nombre IN ('COBRADOR', 'ADMIN', 'SUPERVISOR') AND u.activo = 1
+           ORDER BY CASE WHEN r.nombre = 'ADMIN' THEN 0 WHEN r.nombre = 'SUPERVISOR' THEN 1 ELSE 2 END, u.nombre_completo`
         );
 
     let filas;
@@ -1886,7 +1921,7 @@ async function cerrarCierreCajaDia(req, res) {
        FROM Usuarios u
        JOIN Roles r ON u.rol_id = r.id
        WHERE u.id = ? AND u.deleted_at IS NULL AND u.activo = 1
-         AND r.nombre IN ('COBRADOR', 'ADMIN')`,
+         AND r.nombre IN ('COBRADOR', 'ADMIN', 'SUPERVISOR')`,
       [cobradorId]
     );
     if (!cob) {
@@ -1943,11 +1978,11 @@ async function cerrarCierreCajaDia(req, res) {
     }
 
     const id = req.body?.id || uuidv4();
-    const esAdminCaja = String(cob.rol || '').toUpperCase() === 'ADMIN';
+    const esAdminCaja = esAdminOperativo(cob.rol);
     const obs =
       req.body?.observaciones ||
       (esAdminCaja
-        ? `Cierre caja admin / recaudo propio (${fecha}).`
+        ? `Cierre caja ${String(cob.rol).toLowerCase()} / recaudo propio (${fecha}).`
         : `Cierre registrado por administrador (${fecha}${fecha === val.hoy ? '' : ', dia anterior'}).`);
 
     await query(

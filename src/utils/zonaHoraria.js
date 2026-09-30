@@ -95,6 +95,32 @@ function ahoraSqlNicaragua(date = new Date()) {
 }
 
 /**
+ * Normaliza cualquier timestamp de cobro/gestión a DATETIME pared Nicaragua.
+ * - ISO con Z/offset (legado toISOString del teléfono) → convierte a hora Nic.
+ * - 'YYYY-MM-DD HH:mm:ss' sin zona → se asume ya hora Nic (no mover).
+ */
+function normalizarFechaHoraSqlNicaragua(valor) {
+  if (valor == null || valor === '') return ahoraSqlNicaragua();
+  if (valor instanceof Date) {
+    return Number.isNaN(valor.getTime()) ? ahoraSqlNicaragua() : ahoraSqlNicaragua(valor);
+  }
+  const s = String(valor).trim();
+  if (!s) return ahoraSqlNicaragua();
+  const wall = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  const hasTz = /[zZ]|[+-]\d{2}:?\d{2}$/.test(s) || /[zZ]|[+-]\d{2}:?\d{2}/.test(s.slice(19));
+  if (wall && !hasTz && !s.includes('T')) {
+    return `${wall[1]} ${wall[2]}`;
+  }
+  if (wall && !hasTz && s.includes('T') && !/[zZ]|[+-]\d{2}/.test(s)) {
+    // 'YYYY-MM-DDTHH:mm:ss' sin zona → pared Nic
+    return `${wall[1]} ${wall[2]}`;
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return ahoraSqlNicaragua();
+  return ahoraSqlNicaragua(d);
+}
+
+/**
  * DATETIME SQL en calendario Nicaragua para un día YYYY-MM-DD.
  * Si es hoy → hora actual local; si es pasado → 17:00 local (medio día operativo).
  */
@@ -133,6 +159,7 @@ module.exports = {
   toFechaISO,
   ahoraSqlNicaragua,
   fechaHoraSqlNicaragua,
+  normalizarFechaHoraSqlNicaragua,
   rangoDiaNicaragua,
   rangoPeriodoNicaragua,
 };

@@ -15,7 +15,7 @@ const { upsertFiadorEnNube, verificarFiadorEnNube, repararFiadoresHistoricos } =
 const { insertMany } = require('../utils/bulkSql');
 const { buildRutaDiariaAdmin } = require('../utils/rutaDiariaAdmin');
 const { rangoDiaLocal, whereCierreCalendarioDia, desdeCorreccionesUnix } = require('../utils/fechasSql');
-const { hoyISO, toFechaISO } = require('../utils/zonaHoraria');
+const { hoyISO, toFechaISO, normalizarFechaHoraSqlNicaragua } = require('../utils/zonaHoraria');
 const {
   ensureRutaForCobrador,
   sincronizarRutaClienteAsignado,
@@ -1127,7 +1127,8 @@ async function pushSync(req, res) {
           }
         }
 
-        const { inicio, fin } = rangoDiaLocal(p.fecha_pago || new Date());
+        const fechaPagoSql = normalizarFechaHoraSqlNicaragua(p.fecha_pago || new Date());
+        const { inicio, fin } = rangoDiaLocal(fechaPagoSql);
         const [cobroHoy] = await conn.execute(
           `SELECT id, registrado_por_admin, operador_id, cobrador_id FROM Pagos
            WHERE prestamo_id = ? AND deleted_at IS NULL
@@ -1177,7 +1178,7 @@ async function pushSync(req, res) {
 
         // Día con caja cerrada: el cobrador no puede subir cobros; solo admin (registrado_por_admin).
         if (!Number(p.registrado_por_admin)) {
-          const diaPago = toFechaISO(p.fecha_pago || new Date());
+          const diaPago = toFechaISO(fechaPagoSql);
           const cobradorCierre = p.cobrador_id || cobradorId;
           const [cierreRows] = await conn.execute(
             `SELECT id FROM Cierre_Caja
@@ -1237,7 +1238,7 @@ async function pushSync(req, res) {
               prestamoIdPago,
               p.cobrador_id,
               montoEfectivo,
-              p.fecha_pago,
+              fechaPagoSql,
               n(p.latitud, 0),
               n(p.longitud, 0),
               p.registrado_por_admin ? 1 : 0,
@@ -1256,7 +1257,7 @@ async function pushSync(req, res) {
                 prestamoIdPago,
                 p.cobrador_id,
                 montoEfectivo,
-                p.fecha_pago,
+                fechaPagoSql,
                 n(p.latitud, 0),
                 n(p.longitud, 0),
                 p.registrado_por_admin ? 1 : 0,
@@ -1296,9 +1297,10 @@ async function pushSync(req, res) {
           synced.gestiones.push(g.id);
           continue;
         }
+        const fechaGestionSql = normalizarFechaHoraSqlNicaragua(g.fecha_gestion || new Date());
         const prestamoIdG = g.prestamo_id;
         if (prestamoIdG) {
-          const { inicio, fin } = rangoDiaLocal(g.fecha_gestion || new Date());
+          const { inicio, fin } = rangoDiaLocal(fechaGestionSql);
           const [gestHoy] = await conn.execute(
             `SELECT id FROM Gestiones_No_Pago
              WHERE prestamo_id = ? AND deleted_at IS NULL
@@ -1319,7 +1321,7 @@ async function pushSync(req, res) {
           }
         }
         if (!Number(g.registrado_por_admin)) {
-          const diaGest = toFechaISO(g.fecha_gestion || new Date());
+          const diaGest = toFechaISO(fechaGestionSql);
           const cobradorCierre = g.cobrador_id || cobradorId;
           const [cierreRows] = await conn.execute(
             `SELECT id FROM Cierre_Caja
@@ -1349,7 +1351,7 @@ async function pushSync(req, res) {
             g.prestamo_id,
             g.cobrador_id,
             g.motivo,
-            g.fecha_gestion,
+            fechaGestionSql,
             n(g.latitud, 0),
             n(g.longitud, 0),
             g.registrado_por_admin ? 1 : 0,

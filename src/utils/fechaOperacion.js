@@ -1,8 +1,13 @@
 /**
  * Fecha de operación admin (cobros / renovaciones / créditos con día pasado).
- * Solo YYYY-MM-DD o ISO; no admite futuro.
+ * Guarda DATETIME en hora de Nicaragua (America/Managua), no UTC.
  */
-const { hoyISO, toFechaISO, rangoDiaNicaragua } = require('./zonaHoraria');
+const {
+  hoyISO,
+  toFechaISO,
+  rangoDiaNicaragua,
+  fechaHoraSqlNicaragua,
+} = require('./zonaHoraria');
 
 const MAX_DIAS_ATRAS = 120;
 
@@ -26,7 +31,7 @@ function resolverFechaOperacion(valor, opts = {}) {
     const rango = rangoDiaNicaragua(hoy);
     return {
       dia: hoy,
-      fechaSql: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      fechaSql: fechaHoraSqlNicaragua(hoy),
       esHoy: true,
       rango,
     };
@@ -49,11 +54,7 @@ function resolverFechaOperacion(valor, opts = {}) {
 
   const rango = rangoDiaNicaragua(dia);
   const esHoy = dia === hoy;
-  // 17:00 Nicaragua = 23:00 UTC del mismo día calendario
-  const [y, m, d] = dia.split('-').map(Number);
-  const fechaSql = esHoy
-    ? new Date().toISOString().slice(0, 19).replace('T', ' ')
-    : new Date(Date.UTC(y, m - 1, d, 23, 0, 0)).toISOString().slice(0, 19).replace('T', ' ');
+  const fechaSql = fechaHoraSqlNicaragua(dia);
 
   return { dia, fechaSql, esHoy, rango };
 }

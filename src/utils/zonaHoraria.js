@@ -69,11 +69,51 @@ function hoyISO() {
   return fechaEnZona(new Date());
 }
 
-/** Rango [inicio, fin) en UTC para filtros sobre fecha_pago almacenada en UTC. */
+/**
+ * Fecha-hora actual en Nicaragua como 'YYYY-MM-DD HH:mm:ss' (para DATETIME MySQL).
+ * Evita que después de las 18:00 (UTC ya al día siguiente) se guarde el día corrido.
+ */
+function ahoraSqlNicaragua(date = new Date()) {
+  const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: ZONA_NICARAGUA,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(d);
+    const get = (t) => parts.find((p) => p.type === t)?.value;
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  } catch {
+    const ms = d.getTime() - 6 * 60 * 60 * 1000;
+    return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+  }
+}
+
+/**
+ * DATETIME SQL en calendario Nicaragua para un día YYYY-MM-DD.
+ * Si es hoy → hora actual local; si es pasado → 17:00 local (medio día operativo).
+ */
+function fechaHoraSqlNicaragua(diaISO, date = new Date()) {
+  const dia = toFechaISO(diaISO);
+  if (dia === hoyISO()) return ahoraSqlNicaragua(date);
+  return `${dia} 17:00:00`;
+}
+
+/** Rango [inicio, fin) para filtrar fecha_pago del día calendario Nicaragua.
+ * Incluye:
+ * - hora local 00:00–23:59 del día (guardado Nicaragua)
+ * - cola UTC 00:00–06:00 del día siguiente (legado toISOString tras las 18:00)
+ * inicio ampliado a 00:00 para no perder operaciones locales madrugada.
+ */
 function rangoDiaNicaragua(fechaISO) {
   const d = toFechaISO(fechaISO);
   const [y, m, day] = d.split('-').map(Number);
-  const inicio = `${d} 06:00:00`;
+  const inicio = `${d} 00:00:00`;
   const finDate = new Date(Date.UTC(y, m - 1, day + 1, 6, 0, 0, 0));
   const fin = `${finDate.toISOString().slice(0, 10)} 06:00:00`;
   return { inicio, fin };
@@ -86,4 +126,13 @@ function rangoPeriodoNicaragua(desdeISO, hastaISO) {
   return { inicio, fin };
 }
 
-module.exports = { ZONA_NICARAGUA, fechaEnZona, hoyISO, toFechaISO, rangoDiaNicaragua, rangoPeriodoNicaragua };
+module.exports = {
+  ZONA_NICARAGUA,
+  fechaEnZona,
+  hoyISO,
+  toFechaISO,
+  ahoraSqlNicaragua,
+  fechaHoraSqlNicaragua,
+  rangoDiaNicaragua,
+  rangoPeriodoNicaragua,
+};

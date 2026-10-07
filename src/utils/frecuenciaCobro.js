@@ -131,8 +131,21 @@ const resolverFrecuenciaCobro = ({
     };
   }
 
-  // SEMANAL explícito: no dejar que dias_mes residual (estado UI) force DIAS_MES.
+  // SEMANAL explícito: solo si los días son de semana.
+  // Si vienen números 1–31 (15 y 30, etc.), es DIAS_MES aunque el hint diga SEMANAL.
   if (hint === TIPO_SEMANAL || hint === 'SEMANA') {
+    const dmHint = Array.isArray(rawDias)
+      ? ordenarDiasMes(rawDias)
+      : parseDiasMesRaw(rawDias);
+    if (dmHint.length && esListaDiasMes(dmHint)) {
+      return {
+        tipo: TIPO_DIAS_MES,
+        diasSemana: [],
+        diasMes: dmHint,
+        diasParaAgenda: dmHint,
+        periodicidad: TIPO_DIAS_MES,
+      };
+    }
     const diasSemana = parseDiasCobroSemanal(rawDias);
     return {
       tipo: TIPO_SEMANAL,

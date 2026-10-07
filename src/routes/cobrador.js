@@ -28,6 +28,7 @@ const { calcularLiquidacionAnticipada } = require('../utils/finanzasNube');
 const { aplicarProrrogaEnNube } = require('../utils/prorrogasNube');
 const { ejecutarRenovacionAtomica } = require('../utils/renovacionNube');
 const { enriquecerPrestamosConRenovacion } = require('../utils/enriquecerRenovacionPrestamo');
+const { resolverFrecuenciaCobro } = require('../utils/frecuenciaCobro');
 const { bumpCarteraVersion } = require('../utils/carteraVersion');
 const { datosWhatsAppCliente } = require('../utils/whatsappCliente');
 const { notificarAdminsCobrosCobrador } = require('../utils/expoPush');
@@ -762,6 +763,12 @@ async function pushSync(req, res) {
         }
         const dias =
           typeof p.dias_de_cobro === 'string' ? p.dias_de_cobro : JSON.stringify(p.dias_de_cobro || ['LUNES']);
+        const periodicidadPrestamo =
+          resolverFrecuenciaCobro({
+            tipo_frecuencia: p.tipo_frecuencia || p.periodicidad,
+            dias_de_cobro: p.dias_de_cobro,
+            dias_mes: p.dias_mes,
+          }).periodicidad || 'SEMANAL';
 
         if (p.renovacion_previa_id) {
           await conn.execute(
@@ -798,6 +805,7 @@ async function pushSync(req, res) {
                 monto_total_pagar = COALESCE(?, monto_total_pagar),
                 frecuencia_semana = COALESCE(?, frecuencia_semana),
                 dias_de_cobro = COALESCE(?, dias_de_cobro),
+                periodicidad = COALESCE(?, periodicidad),
                 estado = COALESCE(?, estado),
                 fecha_desembolso = COALESCE(?, fecha_desembolso),
                 renovacion_previa_id = COALESCE(?, renovacion_previa_id),
@@ -816,6 +824,7 @@ async function pushSync(req, res) {
                 p.monto_total_pagar,
                 p.frecuencia_semana,
                 dias,
+                periodicidadPrestamo,
                 p.estado || 'Activo',
                 p.fecha_desembolso,
                 p.renovacion_previa_id || null,
@@ -837,6 +846,7 @@ async function pushSync(req, res) {
                 saldo_pendiente = COALESCE(?, saldo_pendiente),
                 frecuencia_semana = COALESCE(?, frecuencia_semana),
                 dias_de_cobro = COALESCE(?, dias_de_cobro),
+                periodicidad = COALESCE(?, periodicidad),
                 estado = COALESCE(?, estado),
                 fecha_desembolso = COALESCE(?, fecha_desembolso),
                 renovacion_previa_id = COALESCE(?, renovacion_previa_id),
@@ -856,6 +866,7 @@ async function pushSync(req, res) {
                 p.saldo_pendiente,
                 p.frecuencia_semana,
                 dias,
+                periodicidadPrestamo,
                 p.estado || 'Activo',
                 p.fecha_desembolso,
                 p.renovacion_previa_id || null,
@@ -874,7 +885,7 @@ async function pushSync(req, res) {
               cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana,
               dias_de_cobro, periodicidad, estado, fecha_desembolso, renovacion_previa_id,
               numero_recibo_fisico, cobrador_registro_id, cobrador_entrega_id, is_synced
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', ?, ?, ?, ?, ?, ?, 1)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
             [
               p.id,
               clienteId,
@@ -887,6 +898,7 @@ async function pushSync(req, res) {
               p.saldo_pendiente,
               p.frecuencia_semana || 1,
               dias,
+              periodicidadPrestamo,
               p.estado || 'Activo',
               p.fecha_desembolso,
               p.renovacion_previa_id || null,

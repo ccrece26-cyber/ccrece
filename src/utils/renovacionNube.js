@@ -5,6 +5,7 @@
 const { v4: uuidv4 } = require('uuid');
 const { aplicarProrrogaEnNube } = require('./prorrogasNube');
 const { resolverFechaOperacion } = require('./fechaOperacion');
+const { resolverFrecuenciaCobro } = require('./frecuenciaCobro');
 
 function parseDias(np) {
   if (Array.isArray(np.dias_de_cobro)) return np.dias_de_cobro.filter(Boolean);
@@ -17,6 +18,15 @@ function parseDias(np) {
     }
   }
   return ['LUNES'];
+}
+
+function periodicidadDesdeNuevo(np) {
+  const freq = resolverFrecuenciaCobro({
+    tipo_frecuencia: np.tipo_frecuencia || np.periodicidad,
+    dias_de_cobro: np.dias_de_cobro,
+    dias_mes: np.dias_mes,
+  });
+  return freq.periodicidad || 'SEMANAL';
 }
 
 /**
@@ -180,6 +190,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
   const diasArr = parseDias(np);
   const diasJson = JSON.stringify(diasArr);
   const frecuencia = diasArr.length || 1;
+  const periodicidad = periodicidadDesdeNuevo(np);
 
   let tasa = Number(np.tasa_interes_aplicada ?? log.tasa_aplicada);
   if (!Number.isFinite(tasa)) tasa = 0;
@@ -215,7 +226,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
       cuota_semanal_base, monto_total_pagar, saldo_pendiente, frecuencia_semana, dias_de_cobro,
       periodicidad, renovacion_previa_id, estado, fecha_desembolso,
       numero_recibo_fisico, cobrador_registro_id, cobrador_entrega_id, is_synced
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SEMANAL', ?, 'Activo', ?, ?, ?, ?, 1)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Activo', ?, ?, ?, ?, 1)`,
     [
       nuevoId,
       np.cliente_id || ant.cliente_id,
@@ -227,6 +238,7 @@ async function ejecutarRenovacionAtomica(conn, opts) {
       saldoNuevo,
       frecuencia,
       diasJson,
+      periodicidad,
       prestamo_anterior_id,
       fechaDesembolso,
       np.numero_recibo_fisico || null,

@@ -132,7 +132,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
 
     pagos_hoy = await query(
       `SELECT pg.*, p.cliente_id, p.estado, p.saldo_pendiente, p.fecha_desembolso, p.plazo_semanas,
-              p.dias_de_cobro, c.nombre_completo, c.telefono
+              p.dias_de_cobro, p.periodicidad, c.nombre_completo, c.telefono
        FROM Pagos pg
        INNER JOIN Prestamos p ON pg.prestamo_id = p.id
        INNER JOIN Clientes c ON p.cliente_id = c.id
@@ -225,6 +225,7 @@ async function loadAgendaAdminHoy(opciones = {}) {
         dias_de_cobro: p.dias_de_cobro,
         fecha_desembolso: p.fecha_desembolso,
         plazo_semanas: p.plazo_semanas,
+        periodicidad: p.periodicidad,
         monto_total_pagar: p.monto_total_pagar,
         estado_prestamo: p.estado,
         dia_cobro: hoyDia,

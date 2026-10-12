@@ -227,8 +227,8 @@ function resolverLiquidacionEnPush(p, prestamo, pagadoAcumulado, opts = {}) {
 }
 
 /**
- * Fuente de verdad tras cobro: saldo_pendiente − monto (modelo flexible).
- * No usa calendario de cuotas.
+ * Tras cobro: liquidación ajusta total; cobro normal realinea saldo = total − SUM(Pagos).
+ * No restar del saldo en memoria (evita desfases si el campo estaba inflado).
  */
 async function actualizarPrestamoTrasCobro(conn, prestamoId, opts = {}) {
   const { esLiquidacion = false, prestamo = null, montoEfectivo = 0 } = opts;
@@ -253,21 +253,7 @@ async function actualizarPrestamoTrasCobro(conn, prestamoId, opts = {}) {
     return 0;
   }
 
-  let saldoAnterior = Number(prestamo?.saldo_pendiente);
-  if (!Number.isFinite(saldoAnterior)) {
-    const [rows] = await conn.execute(
-      `SELECT saldo_pendiente FROM Prestamos WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
-      [prestamoId]
-    );
-    saldoAnterior = Number(rows[0]?.saldo_pendiente || 0);
-  }
-  const saldo = Math.max(0, Number((saldoAnterior - Number(montoEfectivo || 0)).toFixed(2)));
-  const estado = saldo <= 0.01 ? 'Pagado' : 'Activo';
-  await conn.execute(
-    `UPDATE Prestamos SET saldo_pendiente = ?, estado = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
-    [saldo, estado, prestamoId]
-  );
-  return saldo;
+  return recalcularSaldoPrestamoDesdePagos(conn, prestamoId);
 }
 
 module.exports = {

@@ -256,6 +256,14 @@ async function ejecutarRenovacionAtomica(conn, opts) {
         `Renovación: ${plazoBase}+${semanasProrroga} sem (prórroga al crear)`,
       operador_id: operadorId,
     });
+    // Cuota = total ÷ plazo total (base + prórroga), no solo ÷ base.
+    if (totalPagar > 0 && plazoTotal > 0) {
+      const cuotaTotal = Number((totalPagar / plazoTotal).toFixed(2));
+      await conn.execute(
+        `UPDATE Prestamos SET cuota_semanal_base = ?, updated_at = NOW(), is_synced = 1 WHERE id = ?`,
+        [cuotaTotal, nuevoId]
+      );
+    }
   }
 
   const logId = log.id || uuidv4();

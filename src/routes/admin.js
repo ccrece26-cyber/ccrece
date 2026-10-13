@@ -400,7 +400,10 @@ async function listCobradores(req, res) {
 async function getPermisos(req, res) {
   try {
     const rows = await query(`SELECT valor FROM Parametros_Globales WHERE clave = 'PERMISOS_ROLES'`);
-    const permisos = rows[0]?.valor ? JSON.parse(rows[0].valor) : PERMISOS_DEFAULT;
+    const permisos = rows[0]?.valor ? JSON.parse(rows[0].valor) : { ...PERMISOS_DEFAULT };
+    if (!Array.isArray(permisos.SUPERVISOR)) {
+      permisos.SUPERVISOR = [...PERMISOS_DEFAULT.SUPERVISOR];
+    }
     return res.json({ success: true, data: permisos, labels: LABELS });
   } catch (e) {
     return res.status(500).json({ success: false, message: e.message });
@@ -752,6 +755,106 @@ async function updateContador(req, res) {
     const params = [nombre_completo, email];
     let sql = `UPDATE Usuarios SET nombre_completo = ?, email = ?, updated_at = NOW()`;
     if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      sql += ', password_hash = ?';
+      params.push(hash);
+    }
+    if (activo !== undefined) {
+      sql += ', activo = ?';
+      params.push(activo);
+    }
+    sql += ' WHERE id = ?';
+    params.push(id);
+    await query(sql, params);
+    return res.json({ success: true, id });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function listSupervisores(req, res) {
+  try {
+    const todos = req.query.todos === '1';
+    let sql = `SELECT u.id, u.nombre_completo, u.email, u.activo FROM Usuarios u
+       JOIN Roles r ON u.rol_id = r.id WHERE r.nombre = 'SUPERVISOR'`;
+    if (!todos) sql += ' AND u.activo = 1';
+    sql += ' ORDER BY u.activo DESC, u.nombre_completo ASC';
+    const rows = await query(sql);
+    return res.json({ success: true, data: rows });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function createSupervisor(req, res) {
+  try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
+    const nombre_completo = String(req.body.nombre_completo || '').trim();
+    const email = String(req.body.email || '').toLowerCase().trim();
+    const password = String(req.body.password || '').trim();
+    if (!nombre_completo || !email || !password) {
+      return res.status(400).json({ success: false, message: 'Nombre, email y contraseña requeridos.' });
+    }
+    if (password.length < 4) {
+      return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 4 caracteres.' });
+    }
+    const { ROL_IDS } = require('../utils/roles');
+    const hash = await bcrypt.hash(password, 10);
+    const id = `SUP-${Date.now().toString(36)}`;
+    const [existing] = await query('SELECT id FROM Usuarios WHERE LOWER(TRIM(email)) = ?', [email]);
+    if (existing?.id) {
+      await query(
+        `UPDATE Usuarios SET nombre_completo = ?, password_hash = ?, rol_id = ?, activo = 1,
+            deleted_at = NULL, updated_at = NOW()
+         WHERE id = ?`,
+        [nombre_completo, hash, ROL_IDS.SUPERVISOR, existing.id]
+      );
+      return res.json({ success: true, id: existing.id, email, actualizado: true });
+    }
+    await query(
+      `INSERT INTO Usuarios (id, rol_id, nombre_completo, email, password_hash, activo, is_synced)
+       VALUES (?, ?, ?, ?, ?, 1, 1)`,
+      [id, ROL_IDS.SUPERVISOR, nombre_completo, email, hash]
+    );
+    return res.json({ success: true, id, email });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+}
+
+async function updateSupervisor(req, res) {
+  try {
+    if (!(await exigirSoloAdminDueno(req, res, 'Solo el administrador puede gestionar usuarios.'))) return;
+    const { id } = req.params;
+    const nombre_completo = String(req.body.nombre_completo || '').trim();
+    const email = String(req.body.email || '').toLowerCase().trim();
+    const password = String(req.body.password || '').trim();
+    const activo = req.body.activo === undefined ? undefined : req.body.activo ? 1 : 0;
+
+    if (!nombre_completo || !email) {
+      return res.status(400).json({ success: false, message: 'Nombre y email requeridos.' });
+    }
+
+    const [user] = await query(
+      `SELECT u.id FROM Usuarios u JOIN Roles r ON u.rol_id = r.id WHERE u.id = ? AND r.nombre = 'SUPERVISOR'`,
+      [id]
+    );
+    if (!user) return res.status(404).json({ success: false, message: 'Supervisora no encontrada.' });
+
+    const [emailTaken] = await query(
+      'SELECT id FROM Usuarios WHERE LOWER(TRIM(email)) = ? AND id != ?',
+      [email, id]
+    );
+    if (emailTaken?.id) {
+      return res.status(400).json({ success: false, message: 'Ese email ya esta en uso.' });
+    }
+
+    const params = [nombre_completo, email];
+    let sql = `UPDATE Usuarios SET nombre_completo = ?, email = ?, updated_at = NOW()`;
+    if (password) {
+      if (password.length < 4) {
+        return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 4 caracteres.' });
+      }
       const hash = await bcrypt.hash(password, 10);
       sql += ', password_hash = ?';
       params.push(hash);
@@ -2359,10 +2462,13 @@ module.exports = {
   listRutas,
   listCobradores,
   listContadores,
+  listSupervisores,
   createCobrador,
   updateCobrador,
   createContador,
   updateContador,
+  createSupervisor,
+  updateSupervisor,
   resetPasswordUsuario,
   getPermisos,
   setPermisos,

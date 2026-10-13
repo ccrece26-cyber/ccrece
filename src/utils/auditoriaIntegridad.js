@@ -66,6 +66,15 @@ async function auditarSaldosActivos() {
   return { total: rows.length, ok, criticos };
 }
 
+/**
+ * Estados raros reales:
+ * - Pagado con saldo > 0
+ * - Activo con saldo 0 (debió cerrarse)
+ *
+ * No se compara monto_total_pagar vs SUM(pagos) en créditos Pagado:
+ * en liquidación anticipada el interés se recalcula y el total contractual
+ * puede diferir de la suma de pagos sin ser un error.
+ */
 async function auditarEstadosPrestamos() {
   return query(
     `SELECT p.id AS prestamo_id, c.cedula, c.nombre_completo, p.estado, p.saldo_pendiente, p.monto_total_pagar,
@@ -77,9 +86,6 @@ async function auditarEstadosPrestamos() {
        AND (
          (p.estado = 'Pagado' AND p.saldo_pendiente > 1.5)
          OR (p.estado = 'Activo' AND p.saldo_pendiente <= 0.01 AND p.monto_total_pagar > 0)
-         OR (p.estado = 'Pagado' AND p.saldo_pendiente <= 0.01
-             AND ABS(p.monto_total_pagar - (SELECT COALESCE(SUM(monto_pagado),0) FROM Pagos pg
-                  WHERE pg.prestamo_id = p.id AND pg.deleted_at IS NULL)) > 1.5)
        )
      ORDER BY c.nombre_completo`
   );

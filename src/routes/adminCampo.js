@@ -292,8 +292,7 @@ async function getBuscarClientesCampo(req, res) {
          INNER JOIN Rutas r ON rc.ruta_id = r.id AND r.cobrador_id = ? AND r.activa = 1 AND r.deleted_at IS NULL
          LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
          WHERE c.deleted_at IS NULL
-         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC
-         LIMIT 200`,
+         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC`,
         [adminId]
       );
     } else {
@@ -311,8 +310,7 @@ async function getBuscarClientesCampo(req, res) {
            AND p.deleted_at IS NULL
          LEFT JOIN Usuarios u ON c.cobrador_id = u.id AND u.deleted_at IS NULL
          WHERE c.deleted_at IS NULL
-         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC
-         LIMIT 400`
+         ORDER BY c.nombre_completo ASC, p.fecha_desembolso DESC`
       );
     }
 

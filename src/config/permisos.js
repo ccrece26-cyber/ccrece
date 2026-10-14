@@ -1,3 +1,14 @@
+/** Acciones de modo campo (cobros / créditos / clientes). */
+const PERMISOS_MODO_CAMPO = [
+  'ruta',
+  'clientes.ver',
+  'clientes.crear',
+  'prestamos.crear',
+  'prestamos.renovar',
+  'cobros',
+  'no_pago',
+];
+
 const PERMISOS_DEFAULT = {
   ADMIN: ['*'],
   /** Supervisa cartera/cobros; sin usuarios, carga masiva, integridad, permisos ni respaldo. */
@@ -13,6 +24,7 @@ const PERMISOS_DEFAULT = {
     'reportes',
     'prorrogas',
     'campo',
+    ...PERMISOS_MODO_CAMPO,
   ],
   COBRADOR: [
     'ruta',

@@ -403,6 +403,11 @@ async function getPermisos(req, res) {
     const permisos = rows[0]?.valor ? JSON.parse(rows[0].valor) : { ...PERMISOS_DEFAULT };
     if (!Array.isArray(permisos.SUPERVISOR)) {
       permisos.SUPERVISOR = [...PERMISOS_DEFAULT.SUPERVISOR];
+    } else {
+      // Asegurar acciones de modo campo aunque el JSON en BD sea anterior.
+      const set = new Set(permisos.SUPERVISOR);
+      for (const k of PERMISOS_DEFAULT.SUPERVISOR) set.add(k);
+      permisos.SUPERVISOR = [...set];
     }
     return res.json({ success: true, data: permisos, labels: LABELS });
   } catch (e) {
